@@ -21,30 +21,32 @@ from smiles import smiles_coder
 
 def constroi_gerador(learning_rate):
     print("=== CONSTROI GERADOR ===")
-    n_nodes = smile_nodes + classes_nodes
 
     in_label = Input(shape=(1,), name="in_label") 
-    li = Embedding(classes_nodes, 50)(in_label)
-    li = Dense(n_nodes, name="gen_dense1")(li)
-    li = Reshape((n_nodes,))(li)
+    label_embedding = Embedding(classes_nodes, latent_dim)(in_label)
+    label_dense = Dense(smile_nodes)(label_embedding)
+    label_reshaped = Reshape((smile_nodes,1))(label_dense)
 
     in_lat = Input(shape=(latent_dim,), name="in_lat")
+    lat_dense = Dense(smile_nodes)(in_lat)
+    lat_reshaped = Reshape((smile_nodes, 1))(lat_dense)
 
-    gen = Dense(n_nodes, name="gen_dense2")(in_lat)
+    gen_input = Concatenate()([lat_reshaped, label_reshaped])
+    gen_input = Flatten()(gen_input)
+
+    gen = Dense(smile_nodes, name="gen_dense1")(gen_input)
     gen = BatchNormalization()(gen)
     gen = LeakyReLU()(gen)
 
-    merge = Concatenate()([gen, li])
-    gen = Dense(256, name="gen_dense3")(merge)
+    gen = Dense(256, name="gen_dense2")(gen)
     gen = BatchNormalization()(gen)
     gen = LeakyReLU()(gen)
 
-    gen = Dense(256, name="gen_dense4")(gen)
+    gen = Dense(512, name="gen_dense3")(gen)
     gen = BatchNormalization()(gen)
     gen = LeakyReLU()(gen)
 
-    smile = Dense(n_nodes, activation='tanh', name="gen_dense5")(gen)
-    smile = Flatten()(smile)
+    smile = Dense(smile_nodes, activation='tanh', name="gen_dense4")(gen)
 
     model = Model([in_lat,in_label], outputs=smile, name="Gerador")
 
@@ -56,19 +58,26 @@ def constroi_gerador(learning_rate):
 # Pega uma imagem e classifica como verdadeira ou falsa.
 def constroi_discriminador(learning_rate):
     print("=== CONSTROI DISCRIMINADOR ===")
-    n_nodes = smile_nodes + classes_nodes
 
-    disc_input = Input(shape=(n_nodes,), name="smile_input")
+    smile_input = Input(shape=(smile_nodes,1), name="smile_input")
 
-    disc = Dense(n_nodes, name="disc_dense1")(disc_input)
+    in_label = Input(shape=(1,), name="in_label")
+    label_embed = Embedding(classes_nodes, latent_dim)(in_label)
+    label_dense = Dense(smile_nodes)(label_embed)
+    label_reshaped = Reshape((smile_nodes,1))(label_dense)
+
+    disc_input = Concatenate()([smile_input, label_reshaped])
+    disc_input = Flatten()(disc_input)
+   
+    disc = Dense(smile_nodes, name="disc_dense1")(disc_input)
     disc = BatchNormalization()(disc)
     disc = LeakyReLU()(disc)
 
-    disc = Dense(256, name="disc_dense2")(disc)
+    disc = Dense(512, name="disc_dense2")(disc)
     disc = BatchNormalization()(disc)
     disc = LeakyReLU()(disc)
 
-    disc = Dense(128, name="disc_dense3")(disc)
+    disc = Dense(256, name="disc_dense3")(disc)
     disc = BatchNormalization()(disc)
     disc = LeakyReLU()(disc)
 
@@ -76,7 +85,7 @@ def constroi_discriminador(learning_rate):
 
     out_layer = Dense(1, activation="sigmoid", name='output_layer')(disc)
 
-    model = Model(inputs=disc_input, outputs=out_layer, name="Discriminador")
+    model = Model(inputs=[smile_input, in_label], outputs=out_layer, name="Discriminador")
 
     opt = Adam(learning_rate=learning_rate)
     model.compile(loss='binary_crossentropy', optimizer=opt, metrics=["accuracy"])
@@ -92,21 +101,20 @@ def define_gan(g_model,d_model, learning_rate):
     label = Input(shape=(1,))
 
     smile = g_model([z, label])
-    smile = Flatten()(smile)
 
     print("Smile shape:", smile.shape)
     print("Label shape:", label.shape)
 
     d_model.trainable = False
 
-    prediction = d_model(smile)
+    prediction = d_model([smile, label])
 
     print("Prediction shape:", prediction.shape)
 
     model = Model([z, label], prediction)
 
     opt = Adam(learning_rate=learning_rate, beta_1=0.5)
-    model.compile(loss='binary_crossentropy', optimizer=opt)
+    model.compile(loss='binary_crossentropy', optimizer=opt, metrics=['accuracy'])
     return model
 
 def gera_amostras_reais(dataset,n_batch):
@@ -182,20 +190,17 @@ def treinamento(gerador,discriminador,gan,dataset,latent_dim,
             # print(f"labels_real: {labels_real.shape}")
             # print(f"y_real: {y_real.shape}")
 
-            disc_input_real = Concatenate(axis=1)([X_real, labels_real])
-            disc_input_real = Flatten()(disc_input_real)
-
-            d_loss_real, _ = discriminador.train_on_batch(disc_input_real, y_real)
+            d_loss_real, _ = discriminador.train_on_batch([X_real, labels_real], y_real)
 
             # Amostras falsas
-            disc_input_fake, y_fake = gera_amostras_falsas(gerador,latent_dim,meio_batch)
+            [X_fake, labels_fake], y_fake = gera_amostras_falsas(gerador,latent_dim,meio_batch)
 
             # print("Before train on fake batch...")
             # print(f"X_fake: {X_fake.shape}")
             # print(f"labels_fake: {labels_fake.shape}")
             # print(f"y_fake: {y_fake.shape}")
 
-            d_loss_fake, _ = discriminador.train_on_batch(disc_input_fake, y_fake)
+            d_loss_fake, _ = discriminador.train_on_batch([X_fake,labels_fake], y_fake)
 
             # Treinamento da GAN
             [z_input, labels_input] = gera_ruido(latent_dim,n_batch,classes_nodes)
@@ -286,7 +291,7 @@ def get_hot_smiles(file_name):
     return smiles_hot_arrays, molecules, classes_hot_arrays, coder
 
 if __name__ == "__main__":
-    tf.debugging.set_log_device_placement(True)
+    # tf.debugging.set_log_device_placement(True)
 
     replace_dict = {'Ag':'D', 'Al':'E', 'Ar':'G', 'As':'J', 'Au':'Q', 'Ba':'X', 'Be':'Y',
                     'Br':'f', 'Ca':'h', 'Cd':'j', 'Ce':'k', 'Cl':'m', 'Cn':'p', 'Co':'q',

@@ -248,8 +248,12 @@ class Discriminator(nn.Module):
             nn.Linear(256, 1)
         )
 
-        self.final = nn.Sequential(
+        self.parallel_3 = nn.Sequential(
             nn.Linear(256, 1)
+        )
+
+        self.final = nn.Sequential(
+            nn.Linear(3, 1)
         )
 
         self.sigmoid = nn.Sigmoid()
@@ -267,9 +271,11 @@ class Discriminator(nn.Module):
         x_2 = self.parallel_2(x1_)
         x2_ = self.parallel2_(x1_)
 
-        x_3 = self.final(x2_)
+        x_3 = self.parallel_3(x2_)
 
-        final_x = torch.cat([x_1, x_2, x_3])
+        x_concatenated = torch.cat([x_1, x_2, x_3], 1)
+        
+        final_x = self.final(x_concatenated)
 
         out = self.sigmoid(final_x)
     
@@ -391,14 +397,13 @@ if __name__ == "__main__":
                 transforms.Normalize(mean=[0.5], std=[0.5])
             ])  
     dataset = DrugLikeMolecules(transform=transform)
-    data_loader = torch.utils.data.DataLoader(dataset, batch_size=64, shuffle = True)
 
     criterion = nn.BCELoss()
     generator = Generator(dataset.smiles_nodes, dataset.smiles.shape).to(device)
     discriminator = Discriminator(dataset.smiles_nodes, dataset.smiles.shape).to(device)
 
-    params = {"g_learning_rate": [0.01, 0.001, 0.0001],
-              "d_learning_rate": [0.1, 0.01, 0.001],
+    params = {"d_learning_rate": [0.01, 0.001, 0.0001],
+              "g_learning_rate": [0.1, 0.01, 0.001],
               "batch_per_epoca": [12, 24, 48]}
     
     combinations = list(product(*params.values()))
@@ -406,7 +411,11 @@ if __name__ == "__main__":
     for param in combinations:
         this_params = dict(zip(params.keys(), param))
 
-        train(this_params, criterion)
+        print(this_params)
+
+        data_loader = torch.utils.data.DataLoader(dataset, batch_size=this_params['batch_per_epoca'], shuffle = True)
+
+        train(this_params, criterion, batch_size=this_params['batch_per_epoca'])
 
         plot(batch_per_epoca=this_params["batch_per_epoca"], g_learning_rate=this_params["g_learning_rate"], d_learning_rate=this_params["d_learning_rate"])
     

@@ -6,9 +6,11 @@ from torchvision import transforms
 from torch.utils.data import Dataset, DataLoader
 from torch.autograd import Variable
 from torchvision.utils import make_grid
+from visualize_statistics import plot
 import matplotlib.pyplot as plt
 import os
 from tqdm import tqdm
+from itertools import product
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -343,10 +345,10 @@ def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, 
 
     return d_loss.data.item()
 
-def save_smiles(epoch, sample_smiles, dataset):
+def save_smiles(epoch, sample_smiles, dataset, params):
     # Rescale smiles 0 - 1
-    if not os.path.exists('./smiles'):
-        os.mkdir('./smiles')
+    if not os.path.exists(f"./smiles_lr{params['learning_rate']}_bpe{params['batch_per_epoca']}"):
+        os.mkdir(f"./smiles_lr{params['learning_rate']}_bpe{params['batch_per_epoca']}")
 
     all_gen_smiles = []
     for sml in sample_smiles:
@@ -354,11 +356,40 @@ def save_smiles(epoch, sample_smiles, dataset):
         all_gen_smiles.append(dataset.coder.inverse_transform(this_smile)[0])
     processed_molecules = preprocessing_data(all_gen_smiles, inverse_dict)
 
-    with open('smiles/cgan_%d.txt' % epoch, 'a') as f:
+    with open(f"./smiles_lr{params['learning_rate']}_bpe{params['batch_per_epoca']}/cgan_{epoch}.txt", 'a') as f:
         for molecule in processed_molecules:
             f.write(molecule)
             f.write('\n')
         f.close()
+
+def train(params, batch_size=None, num_epochs = 50000, display_step = 10):
+
+    d_optimizer = torch.optim.Adam(discriminator.parameters(), lr=params['learning_rate'])
+    g_optimizer = torch.optim.Adam(generator.parameters(), lr=params['learning_rate'])
+
+    for epoch in range(num_epochs):
+        # print('Starting epoch {}...'.format(epoch))
+
+        for i, (smiles) in enumerate(data_loader):
+            real_smiles = Variable(smiles.to(torch.long)).to(device).squeeze(1)
+
+            generator.train()
+
+            if batch_size == None:
+                batch_size = real_smiles.size(0)
+
+            d_loss = discriminator_train_step(batch_size, discriminator,
+                                                generator, d_optimizer,
+                                                real_smiles)
+
+            g_loss = generator_train_step(batch_size, discriminator, generator, g_optimizer)
+
+        generator.eval()
+        print('Epoch: [{}] --- g_loss: {}, d_loss: {}'.format(epoch, g_loss, d_loss))
+        if epoch % display_step == 0:
+            z = Variable(torch.randn(64, 100)).to(device)
+            sample_smiles = generator(z)
+            save_smiles(epoch, sample_smiles, dataset, params)
 
 if __name__ == "__main__":
     transform = transforms.Compose([
@@ -371,31 +402,15 @@ if __name__ == "__main__":
     generator = Generator(dataset.smiles_nodes, dataset.smiles.shape).to(device)
     discriminator = Discriminator(dataset.smiles_nodes, dataset.smiles.shape).to(device)
 
-    d_optimizer = torch.optim.Adam(discriminator.parameters(), lr=1e-4)
-    g_optimizer = torch.optim.Adam(generator.parameters(), lr=1e-4)
+    params = {"learning_rate": [0.01, 0.001, 0.0001],
+              "batch_per_epoca": [None]}
+    
+    combinations = list(product(*params.values()))
 
-    num_epochs = 50000
-    n_critic = 5
-    display_step = 300
+    for param in combinations:
+        this_params = dict(zip(params.keys(), param))
 
-    for epoch in range(num_epochs):
-        # print('Starting epoch {}...'.format(epoch))
+        train(this_params)
 
-        for i, (smiles) in enumerate(data_loader):
-            real_smiles = Variable(smiles.to(torch.long)).to(device).squeeze(1)
-
-            generator.train()
-            batch_size = real_smiles.size(0)
-
-            d_loss = discriminator_train_step(batch_size, discriminator,
-                                                generator, d_optimizer,
-                                                real_smiles)
-
-            g_loss = generator_train_step(batch_size, discriminator, generator, g_optimizer)
-
-        generator.eval()
-        print('Epoch: [{}] --- g_loss: {}, d_loss: {}'.format(epoch, g_loss, d_loss))
-        if epoch % 100 == 0:
-            z = Variable(torch.randn(64, 100)).to(device)
-            sample_smiles = generator(z)
-            save_smiles(epoch, sample_smiles, dataset)
+        plot(batch_per_epoca=this_params["batch_per_epoca"], learning_rate=this_params["learning_rate"])
+    

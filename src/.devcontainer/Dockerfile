@@ -1,4 +1,4 @@
-FROM nvidia/cuda:11.8.0-base-ubuntu20.04
+FROM tensorflow/tensorflow:2.15.0-gpu
 
 RUN apt-get -y update
 RUN apt-get -y install git

@@ -248,8 +248,12 @@ class Discriminator(nn.Module):
             nn.Linear(256, 1)
         )
 
-        self.final = nn.Sequential(
+        self.parallel_3 = nn.Sequential(
             nn.Linear(256, 1)
+        )
+
+        self.final = nn.Sequential(
+            nn.Linear(3, 1)
         )
 
         self.sigmoid = nn.Sigmoid()
@@ -267,9 +271,11 @@ class Discriminator(nn.Module):
         x_2 = self.parallel_2(x1_)
         x2_ = self.parallel2_(x1_)
 
-        x_3 = self.final(x2_)
+        x_3 = self.parallel_3(x2_)
 
-        final_x = torch.cat([x_1, x_2, x_3])
+        x_concatenated = torch.cat([x_1, x_2, x_3], 1)
+        
+        final_x = self.final(x_concatenated)
 
         out = self.sigmoid(final_x)
     
@@ -307,30 +313,23 @@ class Generator(nn.Module):
         out = self.model(x)
         return out.view(-1, self.smiles_nodes)
 
-def generator_train_step(batch_size, discriminator, generator, g_optimizer):
-    def generator_loss(fake_output):
-        return -torch.mean(torch.log(fake_output + 1e-8))
-    
+def generator_train_step(batch_size, discriminator, generator, g_optimizer, criterion):
     g_optimizer.zero_grad()
     z = Variable(torch.randn(batch_size, 100)).to(device)
     fake_smiles = generator(z)
     validity = discriminator(fake_smiles)
-    g_loss = generator_loss(validity)
+    g_loss = criterion(validity, Variable(torch.ones(batch_size)).to(device))
     g_loss.backward()
     g_optimizer.step()
     return g_loss.data
 
-def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, real_smiles):
-    def discriminator_loss(real_output, fake_output):
-        real_loss = -torch.mean(torch.log(real_output + 1e-8))
-        fake_loss = -torch.mean(torch.log(1 - fake_output + 1e-8))
-        return real_loss + fake_loss
-    
+def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, criterion, real_smiles):
     d_optimizer.zero_grad()
 
     # train with real smiles
 
     real_validity = discriminator(real_smiles)
+    real_loss = criterion(real_validity, Variable(torch.ones(batch_size)).to(device))
 
     # train with fake smiles
     z = Variable(torch.randn(batch_size, 100)).to(device)
@@ -338,17 +337,17 @@ def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, 
     fake_smiles = generator(z)
 
     fake_validity = discriminator(fake_smiles)
+    fake_loss = criterion(fake_validity, Variable(torch.zeros(batch_size)).to(device))
 
-    d_loss = discriminator_loss(real_validity, fake_validity)
+    d_loss = real_loss + fake_loss
     d_loss.backward()
     d_optimizer.step()
-
     return d_loss.data.item()
 
 def save_smiles(epoch, sample_smiles, dataset, params):
     # Rescale smiles 0 - 1
-    if not os.path.exists(f"./smiles_lr{params['learning_rate']}_bpe{params['batch_per_epoca']}"):
-        os.mkdir(f"./smiles_lr{params['learning_rate']}_bpe{params['batch_per_epoca']}")
+    if not os.path.exists(f"./smiles_glr{params['g_learning_rate']}_dlr{params['d_learning_rate']}_bpe{params['batch_per_epoca']}"):
+        os.mkdir(f"./smiles_glr{params['g_learning_rate']}_dlr{params['d_learning_rate']}_bpe{params['batch_per_epoca']}")
 
     all_gen_smiles = []
     for sml in sample_smiles:
@@ -356,16 +355,16 @@ def save_smiles(epoch, sample_smiles, dataset, params):
         all_gen_smiles.append(dataset.coder.inverse_transform(this_smile)[0])
     processed_molecules = preprocessing_data(all_gen_smiles, inverse_dict)
 
-    with open(f"./smiles_lr{params['learning_rate']}_bpe{params['batch_per_epoca']}/cgan_{epoch}.txt", 'a') as f:
+    with open(f"./smiles_glr{params['g_learning_rate']}_dlr{params['d_learning_rate']}_bpe{params['batch_per_epoca']}/cgan_{epoch}.txt", 'a') as f:
         for molecule in processed_molecules:
             f.write(molecule)
             f.write('\n')
         f.close()
 
-def train(params, batch_size=None, num_epochs = 50000, display_step = 10):
+def train(params, criterion, batch_size=None, num_epochs = 50000, display_step = 10):
 
-    d_optimizer = torch.optim.Adam(discriminator.parameters(), lr=params['learning_rate'])
-    g_optimizer = torch.optim.Adam(generator.parameters(), lr=params['learning_rate'])
+    d_optimizer = torch.optim.SGD(discriminator.parameters(), lr=params['d_learning_rate'])
+    g_optimizer = torch.optim.Adam(generator.parameters(), lr=params['g_learning_rate'])
 
     for epoch in range(num_epochs):
         # print('Starting epoch {}...'.format(epoch))
@@ -380,9 +379,10 @@ def train(params, batch_size=None, num_epochs = 50000, display_step = 10):
 
             d_loss = discriminator_train_step(batch_size, discriminator,
                                                 generator, d_optimizer,
-                                                real_smiles)
+                                                criterion, real_smiles)
 
-            g_loss = generator_train_step(batch_size, discriminator, generator, g_optimizer)
+            g_loss = generator_train_step(batch_size, discriminator,
+                                          generator, g_optimizer, criterion)
 
         generator.eval()
         print('Epoch: [{}] --- g_loss: {}, d_loss: {}'.format(epoch, g_loss, d_loss))
@@ -397,20 +397,25 @@ if __name__ == "__main__":
                 transforms.Normalize(mean=[0.5], std=[0.5])
             ])  
     dataset = DrugLikeMolecules(transform=transform)
-    data_loader = torch.utils.data.DataLoader(dataset, batch_size=64, shuffle = True)
 
+    criterion = nn.BCELoss()
     generator = Generator(dataset.smiles_nodes, dataset.smiles.shape).to(device)
     discriminator = Discriminator(dataset.smiles_nodes, dataset.smiles.shape).to(device)
 
-    params = {"learning_rate": [0.01, 0.001, 0.0001],
-              "batch_per_epoca": [None]}
+    params = {"d_learning_rate": [0.01, 0.001, 0.0001],
+              "g_learning_rate": [0.1, 0.01, 0.001],
+              "batch_per_epoca": [12, 24, 48]}
     
     combinations = list(product(*params.values()))
 
     for param in combinations:
         this_params = dict(zip(params.keys(), param))
 
-        train(this_params)
+        print(this_params)
 
-        plot(batch_per_epoca=this_params["batch_per_epoca"], learning_rate=this_params["learning_rate"])
+        data_loader = torch.utils.data.DataLoader(dataset, batch_size=this_params['batch_per_epoca'], shuffle = True)
+
+        train(this_params, criterion, batch_size=this_params['batch_per_epoca'])
+
+        plot(batch_per_epoca=this_params["batch_per_epoca"], g_learning_rate=this_params["g_learning_rate"], d_learning_rate=this_params["d_learning_rate"])
     

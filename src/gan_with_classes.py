@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 from itertools import product
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 class smiles_coder:
     def __init__(self):
@@ -234,7 +234,7 @@ class Discriminator(nn.Module):
 
 
         self.embedding_labels = nn.Sequential(
-            nn.Embedding(self.classes_nodes, self.classes_nodes)
+            nn.Embedding(self.classes_nodes, self.classes_nodes, sparse=True)
         )
 
         self.smile_input = nn.Sequential(
@@ -293,7 +293,7 @@ class Discriminator(nn.Module):
         x = x.view(x.size(0), self.smiles_nodes)
         c = c.view(c.size(0), self.classes_nodes)
 
-        c = self.embedding_labels(c.to(torch.long).to(device))
+        c = self.embedding_labels(c)
 
         c = c.view(c.size(0), -1)
 
@@ -330,7 +330,7 @@ class Generator(nn.Module):
             nn.Linear(100, smiles_nodes),
             nn.LeakyReLU(0.2, inplace=True),)
 
-        self.label_emb = nn.Embedding(self.classes_nodes, self.classes_nodes)
+        self.label_emb = nn.Embedding(self.classes_nodes, self.classes_nodes, sparse=True)
 
         self.model = nn.Sequential(
             nn.Linear(self.smiles_nodes + self.classes_nodes, 1024),
@@ -360,12 +360,12 @@ def generator_train_step(batch_size, discriminator, generator, g_optimizer, crit
     g_optimizer.zero_grad()
 
     z = Variable(torch.randn(batch_size, 100)).to(device)
-    labels = Variable(torch.randn(batch_size, dataset.classes_nodes)).to(device)
+    labels = Variable(torch.randn(batch_size, dataset.classes_nodes).to(torch.long)).to(device)
 
     fake_smiles = generator(z, labels)
     validity = discriminator(fake_smiles, labels)
 
-    g_loss = criterion(validity, Variable(torch.ones(batch_size)).to(device))
+    g_loss = criterion(validity, Variable(torch.ones(batch_size).to(torch.long)).to(device))
     g_loss.backward()
     g_optimizer.step()
     return g_loss.data
@@ -380,7 +380,7 @@ def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, 
 
     # train with fake smiles
     z = Variable(torch.randn(batch_size, 100)).to(device)
-    labels = Variable(torch.randn(batch_size, dataset.classes_nodes)).to(device)
+    labels = Variable(torch.randn(batch_size, dataset.classes_nodes).to(torch.long)).to(device)
 
     fake_smiles = generator(z, labels)
 

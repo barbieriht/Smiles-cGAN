@@ -2,3 +2,4 @@ utils
 data
 .vscode
 __pycache__
+generated_files

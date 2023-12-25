@@ -153,7 +153,9 @@ def preprocessing_data(molecules, replacement, saving=False):
     for pattern, repl in replacement.items():
         molecules = molecules.str.replace(pattern, repl, regex=False)
 
-    return molecules
+    max_length = len(max(molecules, key=len))
+
+    return molecules, max_length
 
 def get_hot_smiles(file_name):
     with open(file_name, "r") as f:
@@ -167,28 +169,28 @@ def get_hot_smiles(file_name):
 
     unique_elements = list(set([item for sublist in classes for item in sublist]))
 
-    classes_df = pd.DataFrame(columns=unique_elements)
-
-    data = []
+    classes_data = []
     for item in classes:
-        row = {element: float(1) if element in item else float(0) for element in unique_elements}
-        data.append(row)
+        this_row = np.array([])
+        for classe in item:
+            this_row = np.append(this_row, unique_elements.index(classe))
+        classes_data.append(this_row)
 
-    classes_df = pd.concat([classes_df, pd.DataFrame(data)], ignore_index=True)
-    classes_hot_arrays = classes_df.values
+    max_length = max(len(arr) for arr in classes_data)
+    classes_hot_arrays = [np.pad(arr, (0, max_length - len(arr)), mode='constant', constant_values=0) for arr in classes_data]
 
     ########## MOLECULES ##########
     molecules = []
     for s in smiles:
         molecules.append(s[0])
 
-    processed_molecules = preprocessing_data(molecules, replace_dict)
+    processed_molecules, max_length = preprocessing_data(molecules, replace_dict)
 
     coder = smiles_coder()
-    coder.fit(processed_molecules)
+    coder.fit(processed_molecules, max_length)
     smiles_hot_arrays = coder.transform(processed_molecules)
 
-    return smiles_hot_arrays, molecules, classes_hot_arrays, coder, classes_df.columns
+    return smiles_hot_arrays, molecules, classes_hot_arrays, coder, unique_elements
 
 class DrugLikeMolecules(Dataset):
     def __init__(self, transform=None):

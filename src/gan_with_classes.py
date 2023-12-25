@@ -406,7 +406,7 @@ def generator_train_step(batch_size, discriminator, generator, g_optimizer, crit
     g_loss = criterion(validity, Variable(torch.ones(batch_size).to(torch.float)).to(device).float())
     g_loss.backward()
     g_optimizer.step()
-    return g_loss.data
+    return g_loss.data.item()
 
 def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, criterion, real_smiles, labels):
     d_optimizer.zero_grad()
@@ -428,7 +428,7 @@ def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, 
     d_loss = real_loss + fake_loss
     d_loss.backward()
     d_optimizer.step()
-    return d_loss.data.item()
+    return d_loss.data.item(), real_loss.data.item(),  fake_loss.data.item()
 
 def save_smiles(epoch, sample_smiles, sample_classes, dataset, params):
 
@@ -436,8 +436,8 @@ def save_smiles(epoch, sample_smiles, sample_classes, dataset, params):
         os.mkdir('generated_files')
 
     for i in ("smiles", "classes"):
-        if not os.path.exists(f"./generated_files/{i}_glr{params['g_learning_rate']}_dlr{params['d_learning_rate']}_bpe{params['batch_per_epoca']}"):
-            os.mkdir(f"./generated_files/{i}_glr{params['g_learning_rate']}_dlr{params['d_learning_rate']}_bpe{params['batch_per_epoca']}")
+        if not os.path.exists(f"./generated_files/{i}_lr{params['learning_rate']}_bpe{params['batch_per_epoca']}"):
+            os.mkdir(f"./generated_files/{i}_lr{params['learning_rate']}_bpe{params['batch_per_epoca']}")
 
     # Translating smiles
     all_gen_smiles = []
@@ -452,23 +452,25 @@ def save_smiles(epoch, sample_smiles, sample_classes, dataset, params):
         this_classes = dataset.classes_code[cls.detach().cpu().numpy().astype(bool)]
         all_gen_classes.append(this_classes)
 
-    with open(f"./generated_files/smiles_glr{params['g_learning_rate']}_dlr{params['d_learning_rate']}_bpe{params['batch_per_epoca']}/cgan_{epoch}.txt", 'a') as f:
+    with open(f"./generated_files/smiles_lr{params['learning_rate']}_bpe{params['batch_per_epoca']}/cgan_{epoch}.txt", 'a') as f:
         for molecule in processed_molecules:
             f.write(molecule)
             f.write('\n')
         f.close()
 
-    with open(f"./generated_files/classes_glr{params['g_learning_rate']}_dlr{params['d_learning_rate']}_bpe{params['batch_per_epoca']}/cgan_{epoch}.txt", 'a') as f:
+    with open(f"./generated_files/classes_lr{params['learning_rate']}_bpe{params['batch_per_epoca']}/cgan_{epoch}.txt", 'a') as f:
         for classes in all_gen_classes:
             f.write('@'.join(classes))
             f.write('\n')
         f.close()
 
-def train(params, criterion, batch_size=None, num_epochs = 50000, display_step = 10):
+def train(params, criterion, batch_size=None, num_epochs = 500, display_step = 10):
 
-    d_optimizer = torch.optim.SGD(discriminator.parameters(), lr=params['d_learning_rate'])
-    g_optimizer = torch.optim.Adam(generator.parameters(), lr=params['g_learning_rate'])
+    train_tracking = {}
 
+    d_optimizer = torch.optim.SGD(discriminator.parameters(), lr=params['learning_rate'])
+    g_optimizer = torch.optim.Adam(generator.parameters(), lr=params['learning_rate'])
+    
     for epoch in range(num_epochs):
         for i, (smiles, labels) in enumerate(data_loader):
             print('Training model >> Epoch: [{}] -- Batch: [{}]'.format(epoch, i), end='\r')
@@ -485,20 +487,26 @@ def train(params, criterion, batch_size=None, num_epochs = 50000, display_step =
                 batch_size = real_smiles.size(0)
                 
 
-            d_loss = discriminator_train_step(batch_size, discriminator,
+            d_loss, d_real_loss, d_fake_loss = discriminator_train_step(batch_size, discriminator,
                                                 generator, d_optimizer,
                                                 criterion, real_smiles, labels)
 
-            g_loss = generator_train_step(batch_size, discriminator,
+            g_loss  = generator_train_step(batch_size, discriminator,
                                           generator, g_optimizer, criterion, labels.shape)
 
         generator.eval()
         print('Saving smiles >> Epoch: [{}] --- g_loss: {}, d_loss: {}'.format(epoch, g_loss, d_loss))
+
         if epoch % display_step == 0:
             z = Variable(torch.randn(batch_size, 100)).to(device)
             c = Variable(torch.randint(low=0, high=2, size=(batch_size, labels.shape[1]), dtype=torch.float32).to(torch.float)).to(device)
             sample_smiles, sample_classes = generator(z, c)
             save_smiles(epoch, sample_smiles, sample_classes, dataset, params)
+
+        train_tracking[epoch] = {"Discriminator Total Loss":d_loss, "Discriminator Real Loss":d_real_loss,
+                                 "Discriminator Fake Loss":d_fake_loss, "Generator Loss":g_loss}
+
+        
 
 if __name__ == "__main__":
     transform = transforms.Compose([
@@ -511,8 +519,7 @@ if __name__ == "__main__":
     generator = Generator(dataset.smiles_nodes, dataset.smiles.shape, dataset.classes_nodes, dataset.classes.shape).to(device)
     discriminator = Discriminator(dataset.smiles_nodes, dataset.smiles.shape, dataset.classes_nodes, dataset.classes.shape).to(device)
 
-    params = {"d_learning_rate": [0.01, 0.001, 0.0001],
-              "g_learning_rate": [0.1, 0.01, 0.001],
+    params = {"learning_rate": [0.01, 0.001, 0.0001],
               "batch_per_epoca": [12, 24, 48]}
     
     combinations = list(product(*params.values()))
@@ -524,7 +531,7 @@ if __name__ == "__main__":
 
         data_loader = torch.utils.data.DataLoader(dataset, batch_size=this_params['batch_per_epoca'], shuffle=True)
 
-        train(this_params, criterion, batch_size=this_params['batch_per_epoca'])
+        statistics = train(this_params, criterion, batch_size=this_params['batch_per_epoca'])
 
-        plot(batch_per_epoca=this_params["batch_per_epoca"], g_learning_rate=this_params["g_learning_rate"], d_learning_rate=this_params["d_learning_rate"])
+        plot(statistics, batch_per_epoca=this_params["batch_per_epoca"], learning_rate=this_params["learning_rate"])
     

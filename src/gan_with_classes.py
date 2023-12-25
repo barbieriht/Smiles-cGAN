@@ -19,7 +19,8 @@ from itertools import product
 
 from visualize_statistics import plot
 
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+# device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+device = "cpu"
 
 '''Reference: https://hassanaskary.medium.com/intuitive-explanation-of-straight-through-estimators-with-pytorch-implementation-71d99d25d9d0#:~:text=A%20straight%2Dthrough%20estimator%20is,function%20was%20an%20identity%20function.'''
 
@@ -177,7 +178,7 @@ def get_hot_smiles(file_name):
         classes_data.append(this_row)
 
     max_length = max(len(arr) for arr in classes_data)
-    classes_hot_arrays = [np.pad(arr, (0, max_length - len(arr)), mode='constant', constant_values=0) for arr in classes_data]
+    classes_hot_arrays = np.array([np.pad(arr, (0, max_length - len(arr)), mode='constant', constant_values=-1) for arr in classes_data])
 
     ########## MOLECULES ##########
     molecules = []
@@ -199,6 +200,7 @@ class DrugLikeMolecules(Dataset):
         
         self.smiles_nodes = self.smiles.shape[1] * self.smiles.shape[2]
         self.classes_nodes = self.classes.shape[1]
+        self.unique_classes = len(self.classes_code)
 
     def __len__(self):
         return len(self.smiles)
@@ -244,28 +246,59 @@ class DrugLikeMolecules(Dataset):
 #       return out.squeeze()
     
 ############################# ENSEMBLE DISCRIMINATOR #######################
+class Generator(nn.Module):
+    def __init__(self, smiles_nodes, smiles_shape, classes_nodes, classes_shape, unique_classes):
+        super().__init__()
+        self.smiles_nodes = smiles_nodes
+        self.smiles_shape = smiles_shape
+
+        self.classes_nodes = classes_nodes
+        self.classes_shape = classes_shape
+        self.unique_classes = unique_classes
+
+        self.label_emb = nn.Embedding(self.classes_nodes + 2, self.unique_classes + 2)
+
+        self.model = nn.Sequential(
+            nn.Linear(100 + self.classes_nodes * self.unique_classes, 1024),
+            nn.BatchNorm1d(1024),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Linear(1024, 1024),
+            nn.BatchNorm1d(1024),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Linear(1024, 1024),
+            nn.BatchNorm1d(1024),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Linear(1024, smiles_nodes),
+            nn.Tanh()
+        )
+
+    def forward(self, z, c):
+        z = z.view(z.size(0), 100)
+        c = c.view(c.size(0), self.classes_nodes)
+
+        c = self.label_emb(c)
+
+        c = c.view(c.size(0), -1)
+
+        x = torch.cat([z, c], 1)
+        smile_out = self.model(x)
+        
+        return smile_out.view(-1, self.smiles_nodes)
 
 class Discriminator(nn.Module):
-    def __init__(self, smiles_nodes, smiles_shape, classes_nodes, classes_shape):
+    def __init__(self, smiles_nodes, smiles_shape, classes_nodes, classes_shape, unique_classes):
         super().__init__()
         self.smiles_nodes = smiles_nodes
         self.smiles_shape = smiles_shape
         
         self.classes_nodes = classes_nodes
         self.classes_shape = classes_shape
+        self.unique_classes = unique_classes
 
-        self.label_input = nn.Sequential(
-            nn.Linear(self.classes_nodes, 1024),
-            nn.BatchNorm1d(1024),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(1024, 512),
-            nn.BatchNorm1d(512),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(512, self.classes_nodes)
-        )
+        self.label_emb = nn.Embedding(self.classes_nodes + 2, self.unique_classes + 2)
 
         self.smile_input = nn.Sequential(
-            nn.Linear(self.smiles_nodes + self.classes_nodes, 1024),
+            nn.Linear(self.smiles_nodes + self.classes_nodes * self.unique_classes, 1024),
             nn.BatchNorm1d(1024),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Dropout(0.3)
@@ -320,7 +353,7 @@ class Discriminator(nn.Module):
         x = x.view(x.size(0), self.smiles_nodes)
         c = c.view(c.size(0), self.classes_nodes)
 
-        c = self.label_input(c.to(torch.float).to(device))
+        c = self.label_emb(c)
 
         c = c.view(c.size(0), -1)
 
@@ -344,65 +377,14 @@ class Discriminator(nn.Module):
     
         return out.squeeze()
     
-class Generator(nn.Module):
-    def __init__(self, smiles_nodes, smiles_shape, classes_nodes, classes_shape):
-        super().__init__()
-        self.smiles_nodes = smiles_nodes
-        self.smiles_shape = smiles_shape
-
-        self.classes_nodes = classes_nodes
-        self.classes_shape = classes_shape
-
-        self.input_linear = nn.Sequential(
-            nn.Linear(100, smiles_nodes),
-            nn.LeakyReLU(0.2, inplace=True),)
-
-        self.label_gen = nn.Sequential(
-            nn.Linear(self.classes_nodes, 1024),
-            nn.BatchNorm1d(1024),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(1024, 512),
-            nn.BatchNorm1d(512),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(512, self.classes_nodes),
-            nn.Tanh(),
-            StraightThroughEstimator()
-        )
-
-        self.model = nn.Sequential(
-            nn.Linear(self.smiles_nodes + self.classes_nodes, 1024),
-            nn.BatchNorm1d(1024),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(1024, 1024),
-            nn.BatchNorm1d(1024),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(1024, 1024),
-            nn.BatchNorm1d(1024),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(1024, smiles_nodes),
-            nn.Tanh()
-        )
-
-    def forward(self, z, c):
-        z = z.view(z.size(0), 100)
-        c = c.view(c.size(0), self.classes_nodes)
-
-        z = self.input_linear(z)
-        class_out = self.label_gen(c.to(torch.float).to(device))
-
-        x = torch.cat([z, class_out], 1)
-        smile_out = self.model(x)
-        
-        return smile_out.view(-1, self.smiles_nodes), class_out.view(-1, self.classes_nodes)
-
-def generator_train_step(batch_size, discriminator, generator, g_optimizer, criterion, labels_shape):
+def generator_train_step(batch_size, discriminator, generator, g_optimizer, criterion, labels_shape, num_classes):
     g_optimizer.zero_grad()
     
     z = Variable(torch.randn(batch_size, 100)).to(device)
     # c = Variable(torch.randn(batch_size, 100)).to(device)
-    c = Variable(torch.randint(low=0, high=2, size=(labels_shape), dtype=torch.float32).to(torch.float)).to(device)
+    fake_labels = Variable(torch.randint(0, num_classes, size=(labels_shape)).to(torch.long)).to(device)
 
-    fake_smiles, fake_labels = generator(z, c)
+    fake_smiles = generator(z, fake_labels)
     validity = discriminator(fake_smiles, fake_labels)
 
     g_loss = criterion(validity, Variable(torch.ones(batch_size).to(torch.float)).to(device).float())
@@ -410,7 +392,7 @@ def generator_train_step(batch_size, discriminator, generator, g_optimizer, crit
     g_optimizer.step()
     return g_loss.data.item()
 
-def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, criterion, real_smiles, labels):
+def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, criterion, real_smiles, labels, num_classes):
     d_optimizer.zero_grad()
 
     # train with real smiles
@@ -420,9 +402,9 @@ def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, 
 
     # train with fake smiles
     z = Variable(torch.randn(batch_size, 100)).to(device)
-    c = Variable(torch.randint(low=0, high=2, size=(labels.shape), dtype=torch.float32).to(torch.float)).to(device)
+    fake_labels = Variable(torch.randint(0, num_classes, size=(labels.shape)).to(torch.long)).to(device)
 
-    fake_smiles, fake_labels = generator(z, c)
+    fake_smiles = generator(z, fake_labels)
 
     fake_validity = discriminator(fake_smiles, fake_labels)
     fake_loss = criterion(fake_validity, Variable(torch.zeros(batch_size)).to(device))
@@ -466,7 +448,7 @@ def save_smiles(epoch, sample_smiles, sample_classes, dataset, params):
             f.write('\n')
         f.close()
 
-def train(params, criterion, batch_size=None, num_epochs = 500, display_step = 10):
+def train(params, criterion, batch_size=None, num_epochs = 500, display_step = 10, num_classes = 150):
 
     train_tracking = {}
 
@@ -481,7 +463,9 @@ def train(params, criterion, batch_size=None, num_epochs = 500, display_step = 1
                 continue
 
             real_smiles = Variable(smiles.to(torch.float)).to(device).squeeze(1)
-            labels = Variable(labels.to(torch.float)).to(device).squeeze(1)
+            labels = Variable(labels.to(torch.long)).to(device).squeeze(1)
+            
+            assert (labels<num_classes).all(), "target: {} invalid".format(labels)
 
             generator.train()
 
@@ -490,20 +474,20 @@ def train(params, criterion, batch_size=None, num_epochs = 500, display_step = 1
                 
 
             d_loss, d_real_loss, d_fake_loss = discriminator_train_step(batch_size, discriminator,
-                                                generator, d_optimizer,
-                                                criterion, real_smiles, labels)
+                                                generator, d_optimizer, criterion, real_smiles,
+                                                labels, num_classes)
 
-            g_loss  = generator_train_step(batch_size, discriminator,
-                                          generator, g_optimizer, criterion, labels.shape)
+            g_loss  = generator_train_step(batch_size, discriminator, generator, g_optimizer,
+                                           criterion, labels.shape, num_classes)
 
         generator.eval()
         print('Saving smiles >> Epoch: [{}] --- g_loss: {}, d_loss: {}'.format(epoch, g_loss, d_loss))
 
         if epoch % display_step == 0:
             z = Variable(torch.randn(batch_size, 100)).to(device)
-            c = Variable(torch.randint(low=0, high=2, size=(batch_size, labels.shape[1]), dtype=torch.float32).to(torch.float)).to(device)
-            sample_smiles, sample_classes = generator(z, c)
-            save_smiles(epoch, sample_smiles, sample_classes, dataset, params)
+            fake_labels = Variable(torch.randint(0, num_classes, size=(labels.shape)).to(torch.long)).to(device)
+            sample_smiles = generator(z, fake_labels)
+            save_smiles(epoch, sample_smiles, dataset, params)
 
         train_tracking[epoch] = {"Discriminator Total Loss":d_loss, "Discriminator Real Loss":d_real_loss,
                                  "Discriminator Fake Loss":d_fake_loss, "Generator Loss":g_loss}
@@ -518,8 +502,8 @@ if __name__ == "__main__":
     dataset = DrugLikeMolecules(transform=transform)
  
     criterion = nn.BCELoss()
-    generator = Generator(dataset.smiles_nodes, dataset.smiles.shape, dataset.classes_nodes, dataset.classes.shape).to(device)
-    discriminator = Discriminator(dataset.smiles_nodes, dataset.smiles.shape, dataset.classes_nodes, dataset.classes.shape).to(device)
+    generator = Generator(dataset.smiles_nodes, dataset.smiles.shape, dataset.classes_nodes, dataset.classes.shape, dataset.unique_classes).to(device)
+    discriminator = Discriminator(dataset.smiles_nodes, dataset.smiles.shape, dataset.classes_nodes, dataset.classes.shape, dataset.unique_classes).to(device)
 
     params = {"learning_rate": [0.01, 0.001, 0.0001],
               "batch_per_epoca": [12, 24, 48]}
@@ -533,7 +517,7 @@ if __name__ == "__main__":
 
         data_loader = torch.utils.data.DataLoader(dataset, batch_size=this_params['batch_per_epoca'], shuffle=True)
 
-        statistics = train(this_params, criterion, batch_size=this_params['batch_per_epoca'])
+        statistics = train(this_params, criterion, batch_size=this_params['batch_per_epoca'], num_classes=dataset.unique_classes)
 
         plot(statistics, batch_per_epoca=this_params["batch_per_epoca"], learning_rate=this_params["learning_rate"])
     

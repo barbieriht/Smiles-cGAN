@@ -22,21 +22,21 @@ from visualize_statistics import plot
 # device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 device = "cpu"
 
-'''Reference: https://hassanaskary.medium.com/intuitive-explanation-of-straight-through-estimators-with-pytorch-implementation-71d99d25d9d0#:~:text=A%20straight%2Dthrough%20estimator%20is,function%20was%20an%20identity%20function.'''
+# '''Reference: https://hassanaskary.medium.com/intuitive-explanation-of-straight-through-estimators-with-pytorch-implementation-71d99d25d9d0#:~:text=A%20straight%2Dthrough%20estimator%20is,function%20was%20an%20identity%20function.'''
 
-class STEFunction(autograd.Function):
-    @staticmethod
-    def forward(ctx, input):
-        return (input > 0).float()
-    @staticmethod
-    def backward(ctx, grad_output):
-        return F.hardtanh(grad_output)
-class StraightThroughEstimator(nn.Module):
-    def __init__(self):
-        super(StraightThroughEstimator, self).__init__()
-    def forward(self, x):
-        x = STEFunction.apply(x)
-        return x
+# class STEFunction(autograd.Function):
+#     @staticmethod
+#     def forward(ctx, input):
+#         return (input > 0).float()
+#     @staticmethod
+#     def backward(ctx, grad_output):
+#         return F.hardtanh(grad_output)
+# class StraightThroughEstimator(nn.Module):
+#     def __init__(self):
+#         super(StraightThroughEstimator, self).__init__()
+#     def forward(self, x):
+#         x = STEFunction.apply(x)
+#         return x
     
 class smiles_coder:
     def __init__(self):
@@ -168,7 +168,7 @@ def get_hot_smiles(file_name):
     for s in smiles:
         classes.append(s[1].split("@"))
 
-    unique_elements = list(set([item for sublist in classes for item in sublist]))
+    unique_elements = [''] + list(set([item for sublist in classes for item in sublist]))
 
     classes_data = []
     for item in classes:
@@ -178,7 +178,7 @@ def get_hot_smiles(file_name):
         classes_data.append(this_row)
 
     max_length = max(len(arr) for arr in classes_data)
-    classes_hot_arrays = np.array([np.pad(arr, (0, max_length - len(arr)), mode='constant', constant_values=-1) for arr in classes_data])
+    classes_hot_arrays = np.array([np.pad(arr, (0, max_length - len(arr)), mode='constant', constant_values=0) for arr in classes_data])
 
     ########## MOLECULES ##########
     molecules = []
@@ -256,16 +256,16 @@ class Generator(nn.Module):
         self.classes_shape = classes_shape
         self.unique_classes = unique_classes
 
-        self.label_emb = nn.Embedding(self.classes_nodes + 2, self.unique_classes + 2)
+        self.label_emb = nn.Embedding(self.unique_classes, self.classes_nodes)
 
         self.model = nn.Sequential(
-            nn.Linear(100 + self.classes_nodes * self.unique_classes, 1024),
-            nn.BatchNorm1d(1024),
+            nn.Linear(100 + self.classes_nodes**2, 256),
+            nn.BatchNorm1d(256),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(1024, 1024),
-            nn.BatchNorm1d(1024),
+            nn.Linear(256, 512),
+            nn.BatchNorm1d(512),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(1024, 1024),
+            nn.Linear(512, 1024),
             nn.BatchNorm1d(1024),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Linear(1024, smiles_nodes),
@@ -275,6 +275,9 @@ class Generator(nn.Module):
     def forward(self, z, c):
         z = z.view(z.size(0), 100)
         c = c.view(c.size(0), self.classes_nodes)
+
+        assert torch.all(c >= 0)
+        assert torch.all(c < self.label_emb.num_embeddings)
 
         c = self.label_emb(c)
 
@@ -295,10 +298,10 @@ class Discriminator(nn.Module):
         self.classes_shape = classes_shape
         self.unique_classes = unique_classes
 
-        self.label_emb = nn.Embedding(self.classes_nodes + 2, self.unique_classes + 2)
+        self.label_emb = nn.Embedding(self.unique_classes, self.classes_nodes)
 
         self.smile_input = nn.Sequential(
-            nn.Linear(self.smiles_nodes + self.classes_nodes * self.unique_classes, 1024),
+            nn.Linear(self.smiles_nodes + self.classes_nodes**2, 1024),
             nn.BatchNorm1d(1024),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Dropout(0.3)
@@ -352,6 +355,12 @@ class Discriminator(nn.Module):
     def forward(self, x, c):
         x = x.view(x.size(0), self.smiles_nodes)
         c = c.view(c.size(0), self.classes_nodes)
+
+        # print(f"label_emb.num_embeddings: {self.label_emb.num_embeddings}")
+        # print(f"unique_classes: {self.unique_classes}; classes_nodes: {self.classes_nodes}")
+
+        # assert torch.all(c >= 0)
+        # assert torch.all(c < self.label_emb.num_embeddings)
 
         c = self.label_emb(c)
 
@@ -433,11 +442,11 @@ def save_smiles(epoch, sample_smiles, sample_classes, dataset, params):
     # Translating classes
     all_gen_classes = []
     for cls in sample_classes:
-        this_classes = dataset.classes_code[cls.detach().cpu().numpy().astype(bool)]
+        this_classes = [dataset.classes_code[pos] for pos in cls.detach().cpu().numpy()]
         all_gen_classes.append(this_classes)
 
     with open(f"./generated_files/smiles_lr{params['learning_rate']}_bpe{params['batch_per_epoca']}/cgan_{epoch}.txt", 'a') as f:
-        for molecule in processed_molecules:
+        for molecule in processed_molecules[0]:
             f.write(molecule)
             f.write('\n')
         f.close()
@@ -484,10 +493,10 @@ def train(params, criterion, batch_size=None, num_epochs = 500, display_step = 1
         print('Saving smiles >> Epoch: [{}] --- g_loss: {}, d_loss: {}'.format(epoch, g_loss, d_loss))
 
         if epoch % display_step == 0:
-            z = Variable(torch.randn(batch_size, 100)).to(device)
-            fake_labels = Variable(torch.randint(0, num_classes, size=(labels.shape)).to(torch.long)).to(device)
-            sample_smiles = generator(z, fake_labels)
-            save_smiles(epoch, sample_smiles, dataset, params)
+            z = Variable(torch.randn(32, 100)).to(device)
+            sample_classes = Variable(torch.randint(0, num_classes, size=(32, dataset.classes.shape[1])).to(torch.long)).to(device)
+            sample_smiles = generator(z, sample_classes)
+            save_smiles(epoch, sample_smiles, sample_classes, dataset, params)
 
         train_tracking[epoch] = {"Discriminator Total Loss":d_loss, "Discriminator Real Loss":d_real_loss,
                                  "Discriminator Fake Loss":d_fake_loss, "Generator Loss":g_loss}

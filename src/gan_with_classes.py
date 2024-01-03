@@ -18,9 +18,10 @@ from tqdm import tqdm
 from itertools import product
 
 from visualize_statistics import plot
+from rdkit import Chem
 
-# device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-device = "cpu"
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+# device = "cpu"
 
 # '''Reference: https://hassanaskary.medium.com/intuitive-explanation-of-straight-through-estimators-with-pytorch-implementation-71d99d25d9d0#:~:text=A%20straight%2Dthrough%20estimator%20is,function%20was%20an%20identity%20function.'''
 
@@ -194,9 +195,9 @@ def get_hot_smiles(file_name):
     return smiles_hot_arrays, molecules, classes_hot_arrays, coder, unique_elements
 
 class DrugLikeMolecules(Dataset):
-    def __init__(self, transform=None):
+    def __init__(self, transform=None, file_path="chebi_smiles_com_classes.txt"):
         self.transform = transform
-        self.smiles, self.dataset, self.classes, self.coder, self.classes_code = get_hot_smiles("chebi_smiles_1of10_subset.txt")
+        self.smiles, self.dataset, self.classes, self.coder, self.classes_code = get_hot_smiles(file_path)
         
         self.smiles_nodes = self.smiles.shape[1] * self.smiles.shape[2]
         self.classes_nodes = self.classes.shape[1]
@@ -386,17 +387,56 @@ class Discriminator(nn.Module):
     
         return out.squeeze()
     
+def backup_and_check_percentage(data_list):
+    file_path = 'smiles_backup.txt'
+    # Load existing data from the file if it exists
+    existing_data = set()
+    if os.path.exists(file_path):
+        with open(file_path, 'r') as file:
+            for line in file:
+                existing_data.add(line.strip())
+
+    # Remove duplicates from the current data list
+    unique_data_list = list(set(data_list))
+
+    # Identify new elements that are not already in the file
+    new_elements = set(unique_data_list).difference(existing_data)
+
+    # Backup the new elements to the file
+    with open(file_path, 'a') as file:
+        for element in new_elements:
+            file.write(str(element) + '\n')
+
+    # Calculate the percentage of elements in the current list that are already in the file
+    common_elements = set(unique_data_list).intersection(existing_data)
+    percentage_common = (len(common_elements) / len(unique_data_list)) * 100
+
+    return percentage_common
+
 def generator_train_step(batch_size, discriminator, generator, g_optimizer, criterion, labels_shape, num_classes):
     g_optimizer.zero_grad()
     
     z = Variable(torch.randn(batch_size, 100)).to(device)
-    # c = Variable(torch.randn(batch_size, 100)).to(device)
-    fake_labels = Variable(torch.randint(0, num_classes, size=(labels_shape)).to(torch.long)).to(device)
+    # fake_labels = Variable(torch.randint(0, num_classes, size=(labels_shape)).to(torch.long)).to(device)
+    for _, labels in data_loader:
+        fake_labels = Variable(labels.to(torch.long)).to(device).squeeze(1)
+        break
 
     fake_smiles = generator(z, fake_labels)
     validity = discriminator(fake_smiles, fake_labels)
 
-    g_loss = criterion(validity, Variable(torch.ones(batch_size).to(torch.float)).to(device).float())
+    translated_smiles = translate_smiles(fake_smiles, dataset)
+    
+    duplicated_loss = backup_and_check_percentage(translated_smiles)
+
+    smiles_validity = torch.tensor([float(0) if Chem.MolFromSmiles(this) == None else float(1) for this in translated_smiles])
+
+    g_smiles_validity_loss = criterion(Variable(smiles_validity).to(torch.float).to(device).float(),
+                                        Variable(torch.ones(batch_size).to(torch.float)).to(device).float())
+
+    g_discriminator_loss = criterion(validity, Variable(torch.ones(batch_size).to(torch.float)).to(device).float())
+    
+    g_loss = 0.3 * g_smiles_validity_loss + 0.1 * duplicated_loss + 0.6 * g_discriminator_loss
     g_loss.backward()
     g_optimizer.step()
     return g_loss.data.item()
@@ -423,21 +463,25 @@ def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, 
     d_optimizer.step()
     return d_loss.data.item(), real_loss.data.item(),  fake_loss.data.item()
 
-def save_smiles(epoch, sample_smiles, sample_classes, dataset, params):
-
-    if not os.path.exists('generated_files'):
-        os.mkdir('generated_files')
-
-    for i in ("smiles", "classes"):
-        if not os.path.exists(f"./generated_files/{i}_lr{params['learning_rate']}_bpe{params['batch_per_epoca']}"):
-            os.mkdir(f"./generated_files/{i}_lr{params['learning_rate']}_bpe{params['batch_per_epoca']}")
-
-    # Translating smiles
+def translate_smiles(sample_smiles, dataset):
     all_gen_smiles = []
     for sml in sample_smiles:
         this_smile = np.reshape(sml.detach().cpu().numpy(), (1, dataset.smiles.shape[1], dataset.smiles.shape[2]))
         all_gen_smiles.append(dataset.coder.inverse_transform(this_smile)[0])
     processed_molecules = preprocessing_data(all_gen_smiles, inverse_dict)
+    return [gen_smiles for gen_smiles in processed_molecules[0]]
+
+def save_smiles(epoch, sample_smiles, sample_classes, dataset, params):
+
+    if not os.path.exists('generated_files'):
+        os.mkdir('generated_files')
+ 
+    for i in ("smiles", "classes"):
+        if not os.path.exists(f"./generated_files/{i}_lr{params['learning_rate']}_bpe{params['batch_per_epoca']}"):
+            os.mkdir(f"./generated_files/{i}_lr{params['learning_rate']}_bpe{params['batch_per_epoca']}")
+
+    # Translating smiles
+    processed_molecules = translate_smiles(sample_smiles, dataset)
 
     # Translating classes
     all_gen_classes = []
@@ -446,7 +490,7 @@ def save_smiles(epoch, sample_smiles, sample_classes, dataset, params):
         all_gen_classes.append(this_classes)
 
     with open(f"./generated_files/smiles_lr{params['learning_rate']}_bpe{params['batch_per_epoca']}/cgan_{epoch}.txt", 'a') as f:
-        for molecule in processed_molecules[0]:
+        for molecule in processed_molecules:
             f.write(molecule)
             f.write('\n')
         f.close()
@@ -457,7 +501,7 @@ def save_smiles(epoch, sample_smiles, sample_classes, dataset, params):
             f.write('\n')
         f.close()
 
-def train(params, criterion, batch_size=None, num_epochs = 500, display_step = 10, num_classes = 150):
+def train(params, criterion, batch_size=None, num_epochs = 1000, display_step = 10, num_classes = 150):
 
     train_tracking = {}
 
@@ -466,10 +510,10 @@ def train(params, criterion, batch_size=None, num_epochs = 500, display_step = 1
     
     for epoch in range(num_epochs):
         for i, (smiles, labels) in enumerate(data_loader):
-            print('Training model >> Epoch: [{}] -- Batch: [{}]'.format(epoch, i), end='\r')
 
             if len(smiles) != batch_size or len(labels) != batch_size:
                 continue
+            labels_backup = labels
 
             real_smiles = Variable(smiles.to(torch.float)).to(device).squeeze(1)
             labels = Variable(labels.to(torch.long)).to(device).squeeze(1)
@@ -488,13 +532,18 @@ def train(params, criterion, batch_size=None, num_epochs = 500, display_step = 1
 
             g_loss  = generator_train_step(batch_size, discriminator, generator, g_optimizer,
                                            criterion, labels.shape, num_classes)
+            
+            print('Training model >> Epoch: [{}] -- Batch: [{}]    ->    d_loss: {}  |  g_loss: {}'.format(epoch, i, d_loss, g_loss), end='\r')
 
         generator.eval()
-        print('Saving smiles >> Epoch: [{}] --- g_loss: {}, d_loss: {}'.format(epoch, g_loss, d_loss))
 
         if epoch % display_step == 0:
+            print('Saving smiles >> Epoch: [{}] --- g_loss: {:.2f}, d_loss: {:.2f}'.format(epoch, g_loss, d_loss))
+
             z = Variable(torch.randn(32, 100)).to(device)
-            sample_classes = Variable(torch.randint(0, num_classes, size=(32, dataset.classes.shape[1])).to(torch.long)).to(device)
+            for _, labels in generator_loader:
+                sample_classes = Variable(labels.to(torch.long)).to(device).squeeze(1)
+                break
             sample_smiles = generator(z, sample_classes)
             save_smiles(epoch, sample_smiles, sample_classes, dataset, params)
 
@@ -508,7 +557,9 @@ if __name__ == "__main__":
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.5], std=[0.5])
             ])  
-    dataset = DrugLikeMolecules(transform=transform)
+    dataset = DrugLikeMolecules(transform=transform,
+                                file_path='chebi_smiles_1of10_subset.txt'
+                                )
  
     criterion = nn.BCELoss()
     generator = Generator(dataset.smiles_nodes, dataset.smiles.shape, dataset.classes_nodes, dataset.classes.shape, dataset.unique_classes).to(device)
@@ -519,6 +570,8 @@ if __name__ == "__main__":
     
     combinations = list(product(*params.values()))
 
+    generator_loader = torch.utils.data.DataLoader(dataset, batch_size=32, shuffle=True)
+
     for param in combinations:
         this_params = dict(zip(params.keys(), param))
 
@@ -526,7 +579,7 @@ if __name__ == "__main__":
 
         data_loader = torch.utils.data.DataLoader(dataset, batch_size=this_params['batch_per_epoca'], shuffle=True)
 
-        statistics = train(this_params, criterion, batch_size=this_params['batch_per_epoca'], num_classes=dataset.unique_classes)
+        statistics = train(this_params, criterion, batch_size=this_params['batch_per_epoca'], num_epochs=300, num_classes=dataset.unique_classes)
 
         plot(statistics, batch_per_epoca=this_params["batch_per_epoca"], learning_rate=this_params["learning_rate"])
     

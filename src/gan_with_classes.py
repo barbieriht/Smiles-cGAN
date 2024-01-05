@@ -3,7 +3,8 @@ os.environ['TORCH_USE_CUDA_DSA'] = '1'
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 import pandas as pd
 import numpy as np
-
+import math
+import json
 import torch
 import torch.nn as nn
 from torchvision import transforms
@@ -260,21 +261,24 @@ class Generator(nn.Module):
         self.label_emb = nn.Embedding(self.unique_classes, self.classes_nodes)
 
         self.model = nn.Sequential(
-            nn.Linear(100 + self.classes_nodes**2, 256),
-            nn.BatchNorm1d(256),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(256, 512),
+            nn.Linear(NOISE_DIM + self.classes_nodes**2, 512),
             nn.BatchNorm1d(512),
             nn.LeakyReLU(0.2, inplace=True),
+            nn.Dropout(0.2),
             nn.Linear(512, 1024),
             nn.BatchNorm1d(1024),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(1024, smiles_nodes),
+            nn.Dropout(0.2),
+            nn.Linear(1024, 2048),
+            nn.BatchNorm1d(2048),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Dropout(0.2),
+            nn.Linear(2048, smiles_nodes),
             nn.Tanh()
         )
 
     def forward(self, z, c):
-        z = z.view(z.size(0), 100)
+        z = z.view(z.size(0), NOISE_DIM)
         c = c.view(c.size(0), self.classes_nodes)
 
         assert torch.all(c >= 0)
@@ -413,10 +417,18 @@ def backup_and_check_percentage(data_list):
 
     return percentage_common
 
+def check_repeated(data_list):
+    unique_list = set(data_list)
+    repeated_list = []
+    for element in unique_list:
+        repeated_list.append((sum([item == element for item in data_list]) - 1)/(len(data_list) - 1))
+
+    return torch.tensor(repeated_list)
+
 def generator_train_step(batch_size, discriminator, generator, g_optimizer, criterion, labels_shape, num_classes):
     g_optimizer.zero_grad()
     
-    z = Variable(torch.randn(batch_size, 100)).to(device)
+    z = Variable(torch.randn(batch_size, NOISE_DIM)).to(device)
     # fake_labels = Variable(torch.randint(0, num_classes, size=(labels_shape)).to(torch.long)).to(device)
     for _, labels in data_loader:
         fake_labels = Variable(labels.to(torch.long)).to(device).squeeze(1)
@@ -427,19 +439,26 @@ def generator_train_step(batch_size, discriminator, generator, g_optimizer, crit
 
     translated_smiles = translate_smiles(fake_smiles, dataset)
     
-    duplicated_loss = backup_and_check_percentage(translated_smiles)
+    # duplicated_loss = backup_and_check_percentage(translated_smiles)
+    repeated_list = check_repeated(translated_smiles)
+    g_repeated_loss = criterion(Variable(repeated_list).to(torch.float).to(device).float(),
+                                        Variable(torch.zeros(len(repeated_list)).to(torch.float)).to(device).float())
 
-    smiles_validity = torch.tensor([float(0) if Chem.MolFromSmiles(this) == None else float(1) for this in translated_smiles])
+    smiles_validity = np.mean([float(0) if Chem.MolFromSmiles(this) == None else float(1) for this in translated_smiles])
+    os.system('clear')
 
     g_smiles_validity_loss = criterion(Variable(smiles_validity).to(torch.float).to(device).float(),
                                         Variable(torch.ones(batch_size).to(torch.float)).to(device).float())
-
+    
     g_discriminator_loss = criterion(validity, Variable(torch.ones(batch_size).to(torch.float)).to(device).float())
     
-    g_loss = 0.3 * g_smiles_validity_loss + 0.1 * duplicated_loss + 0.6 * g_discriminator_loss
+    loss_multiplier = (1 + math.log(0.6 * g_repeated_loss + 0.4 * g_smiles_validity_loss + 1) / math.log(3))
+
+    g_loss =  g_discriminator_loss * loss_multiplier
+    
     g_loss.backward()
     g_optimizer.step()
-    return g_loss.data.item()
+    return g_loss.data.item(), loss_multiplier, g_repeated_loss, g_smiles_validity_loss, g_discriminator_loss
 
 def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, criterion, real_smiles, labels, num_classes):
     d_optimizer.zero_grad()
@@ -450,9 +469,11 @@ def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, 
     real_loss = criterion(real_validity, Variable(torch.ones(batch_size)).to(device))
 
     # train with fake smiles
-    z = Variable(torch.randn(batch_size, 100)).to(device)
-    fake_labels = Variable(torch.randint(0, num_classes, size=(labels.shape)).to(torch.long)).to(device)
-
+    z = Variable(torch.randn(batch_size, NOISE_DIM)).to(device)
+    # fake_labels = Variable(torch.randint(0, num_classes, size=(labels_shape)).to(torch.long)).to(device)
+    for _, labels in data_loader:
+        fake_labels = Variable(labels.to(torch.long)).to(device).squeeze(1)
+        break
     fake_smiles = generator(z, fake_labels)
 
     fake_validity = discriminator(fake_smiles, fake_labels)
@@ -471,7 +492,7 @@ def translate_smiles(sample_smiles, dataset):
     processed_molecules = preprocessing_data(all_gen_smiles, inverse_dict)
     return [gen_smiles for gen_smiles in processed_molecules[0]]
 
-def save_smiles(epoch, sample_smiles, sample_classes, dataset, params):
+def save_smiles(epoch, sample_smiles, sample_classes, dataset, params, train_tracking):
 
     if not os.path.exists('generated_files'):
         os.mkdir('generated_files')
@@ -489,24 +510,32 @@ def save_smiles(epoch, sample_smiles, sample_classes, dataset, params):
         this_classes = [dataset.classes_code[pos] for pos in cls.detach().cpu().numpy()]
         all_gen_classes.append(this_classes)
 
-    with open(f"./generated_files/smiles_lr{params['learning_rate']}_bpe{params['batch_per_epoca']}/cgan_{epoch}.txt", 'a') as f:
+    with open(f"./generated_files/smiles_lr{params['learning_rate']}_bpe{params['batch_per_epoca']}/cgan_{epoch}.txt", 'w') as f:
         for molecule in processed_molecules:
             f.write(molecule)
             f.write('\n')
         f.close()
 
-    with open(f"./generated_files/classes_lr{params['learning_rate']}_bpe{params['batch_per_epoca']}/cgan_{epoch}.txt", 'a') as f:
+    with open(f"./generated_files/classes_lr{params['learning_rate']}_bpe{params['batch_per_epoca']}/cgan_{epoch}.txt", 'w') as f:
         for classes in all_gen_classes:
             f.write('@'.join(classes))
             f.write('\n')
         f.close()
+
+    with open(f"./generated_files/statistics_lr{params['learning_rate']}_bpe{params['batch_per_epoca']}.json", 'w') as f:
+        json.dump(train_tracking, f)
+        f.close()
+
+    plot(f"./generated_files/statistics_lr{params['learning_rate']}_bpe{params['batch_per_epoca']}.json",
+         batch_per_epoca=this_params["batch_per_epoca"], learning_rate=this_params["learning_rate"])
+
 
 def train(params, criterion, batch_size=None, num_epochs = 1000, display_step = 10, num_classes = 150):
 
     train_tracking = {}
 
     d_optimizer = torch.optim.SGD(discriminator.parameters(), lr=params['learning_rate'])
-    g_optimizer = torch.optim.Adam(generator.parameters(), lr=params['learning_rate'])
+    g_optimizer = torch.optim.Adam(generator.parameters(), lr=10*params['learning_rate'])
     
     for epoch in range(num_epochs):
         for i, (smiles, labels) in enumerate(data_loader):
@@ -530,43 +559,53 @@ def train(params, criterion, batch_size=None, num_epochs = 1000, display_step = 
                                                 generator, d_optimizer, criterion, real_smiles,
                                                 labels, num_classes)
 
-            g_loss  = generator_train_step(batch_size, discriminator, generator, g_optimizer,
+            g_loss, loss_multiplier, g_rep_loss, g_val_loss, g_disc_loss  = generator_train_step(batch_size, discriminator, generator, g_optimizer,
                                            criterion, labels.shape, num_classes)
             
-            print('Training model >> Epoch: [{}] -- Batch: [{}]    ->    d_loss: {}  |  g_loss: {}'.format(epoch, i, d_loss, g_loss), end='\r')
+            print('Training model >> Epoch: [{}/{}] -- Batch: [{}]\nd_loss: {:.2f}                          |  g_loss: {:.2f}\n\
+d_real_loss: {:.2f}, d_fake_loss: {:.2f}  |  g_disc_loss: {:.2f}, loss_multiplier: {:.2f}, g_rep_loss: {:.2f}, g_val_loss: {:.2f}'.format(
+                        epoch, num_epochs, i, d_loss, g_loss, d_real_loss, d_fake_loss, g_disc_loss, loss_multiplier, g_rep_loss, g_val_loss))
 
         generator.eval()
 
         if epoch % display_step == 0:
-            print('Saving smiles >> Epoch: [{}] --- g_loss: {:.2f}, d_loss: {:.2f}'.format(epoch, g_loss, d_loss))
+            # print('Saving smiles >> Epoch: [{}] --- d_loss: {:.2f}  |  g_loss: {:.2f}\n\
+            #       d_real_loss: {:.2f}, d_fake_loss: {:.2f} | loss_multiplier: {:.2f}, g_rep_loss: {:.2f}, g_val_loss: {:.2f}, g_disc_loss: {:.2f}'.format(
+            #                         epoch, d_loss, g_loss, d_real_loss, d_fake_loss, loss_multiplier, g_rep_loss, g_val_loss, g_disc_loss))
 
-            z = Variable(torch.randn(32, 100)).to(device)
+            z = Variable(torch.randn(32, NOISE_DIM)).to(device)
             for _, labels in generator_loader:
                 sample_classes = Variable(labels.to(torch.long)).to(device).squeeze(1)
                 break
             sample_smiles = generator(z, sample_classes)
-            save_smiles(epoch, sample_smiles, sample_classes, dataset, params)
 
-        train_tracking[epoch] = {"Discriminator Total Loss":d_loss, "Discriminator Real Loss":d_real_loss,
-                                 "Discriminator Fake Loss":d_fake_loss, "Generator Loss":g_loss}
+            train_tracking[epoch] = {"D Loss":d_loss, "D Real Loss":d_real_loss,
+                                 "D Fake Loss":d_fake_loss, "G Loss":g_loss, "G Loss Multiplier":loss_multiplier,
+                                 "G Repeatition Loss":g_rep_loss, "G Validity Loss":g_val_loss}
+            
+            save_smiles(epoch, sample_smiles, sample_classes, dataset, params, train_tracking)
 
-        
+    return train_tracking
 
 if __name__ == "__main__":
+    NOISE_DIM = 256
+
     transform = transforms.Compose([
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.5], std=[0.5])
             ])  
     dataset = DrugLikeMolecules(transform=transform,
-                                file_path='chebi_smiles_1of10_subset.txt'
+                                file_path='chebi_selected_smiles.txt'
                                 )
  
     criterion = nn.BCELoss()
     generator = Generator(dataset.smiles_nodes, dataset.smiles.shape, dataset.classes_nodes, dataset.classes.shape, dataset.unique_classes).to(device)
     discriminator = Discriminator(dataset.smiles_nodes, dataset.smiles.shape, dataset.classes_nodes, dataset.classes.shape, dataset.unique_classes).to(device)
 
-    params = {"learning_rate": [0.01, 0.001, 0.0001],
-              "batch_per_epoca": [12, 24, 48]}
+    params = {"learning_rate": [0.001,
+                                0.0001],
+              "batch_per_epoca": [32,
+                                  64]}
     
     combinations = list(product(*params.values()))
 
@@ -579,7 +618,4 @@ if __name__ == "__main__":
 
         data_loader = torch.utils.data.DataLoader(dataset, batch_size=this_params['batch_per_epoca'], shuffle=True)
 
-        statistics = train(this_params, criterion, batch_size=this_params['batch_per_epoca'], num_epochs=300, num_classes=dataset.unique_classes)
-
-        plot(statistics, batch_per_epoca=this_params["batch_per_epoca"], learning_rate=this_params["learning_rate"])
-    
+        train(this_params, criterion, batch_size=this_params['batch_per_epoca'], num_epochs=5000, num_classes=dataset.unique_classes)    

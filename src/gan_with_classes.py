@@ -264,15 +264,12 @@ class Generator(nn.Module):
             nn.Linear(NOISE_DIM + self.classes_nodes**2, 512),
             nn.BatchNorm1d(512),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.2),
             nn.Linear(512, 1024),
             nn.BatchNorm1d(1024),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.2),
             nn.Linear(1024, 2048),
             nn.BatchNorm1d(2048),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.2),
             nn.Linear(2048, smiles_nodes),
             nn.Tanh()
         )
@@ -444,21 +441,21 @@ def generator_train_step(batch_size, discriminator, generator, g_optimizer, crit
     g_repeated_loss = criterion(Variable(repeated_list).to(torch.float).to(device).float(),
                                         Variable(torch.zeros(len(repeated_list)).to(torch.float)).to(device).float())
 
-    smiles_validity = np.mean([float(0) if Chem.MolFromSmiles(this) == None else float(1) for this in translated_smiles])
+    g_smiles_validity_loss = np.mean([float(1) if Chem.MolFromSmiles(this) == None else float(0) for this in translated_smiles])
     os.system('clear')
 
-    g_smiles_validity_loss = criterion(Variable(smiles_validity).to(torch.float).to(device).float(),
-                                        Variable(torch.ones(batch_size).to(torch.float)).to(device).float())
+    # g_smiles_validity_loss = criterion(Variable(smiles_validity).to(torch.float).to(device).float(),
+    #                                     Variable(torch.ones(batch_size).to(torch.float)).to(device).float())
     
     g_discriminator_loss = criterion(validity, Variable(torch.ones(batch_size).to(torch.float)).to(device).float())
     
-    loss_multiplier = (1 + math.log(0.6 * g_repeated_loss + 0.4 * g_smiles_validity_loss + 1) / math.log(3))
+    loss_multiplier = (1 + math.log(0.6 * g_repeated_loss + 0.4 * g_smiles_validity_loss + 1) / math.log(2))
 
     g_loss =  g_discriminator_loss * loss_multiplier
     
     g_loss.backward()
     g_optimizer.step()
-    return g_loss.data.item(), loss_multiplier, g_repeated_loss, g_smiles_validity_loss, g_discriminator_loss
+    return g_loss.data.item(), loss_multiplier, g_repeated_loss.data.item(), g_smiles_validity_loss, g_discriminator_loss
 
 def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, criterion, real_smiles, labels, num_classes):
     d_optimizer.zero_grad()
@@ -568,6 +565,10 @@ d_real_loss: {:.2f}, d_fake_loss: {:.2f}  |  g_disc_loss: {:.2f}, loss_multiplie
 
         generator.eval()
 
+        train_tracking[epoch] = {"D Loss":d_loss, "D Real Loss":d_real_loss,
+                                "D Fake Loss":d_fake_loss, "G Loss":g_loss, "G Loss Multiplier":loss_multiplier,
+                                "G Repeatition Loss":g_rep_loss, "G Validity Loss":g_val_loss}
+        
         if epoch % display_step == 0:
             # print('Saving smiles >> Epoch: [{}] --- d_loss: {:.2f}  |  g_loss: {:.2f}\n\
             #       d_real_loss: {:.2f}, d_fake_loss: {:.2f} | loss_multiplier: {:.2f}, g_rep_loss: {:.2f}, g_val_loss: {:.2f}, g_disc_loss: {:.2f}'.format(
@@ -579,10 +580,9 @@ d_real_loss: {:.2f}, d_fake_loss: {:.2f}  |  g_disc_loss: {:.2f}, loss_multiplie
                 break
             sample_smiles = generator(z, sample_classes)
 
-            train_tracking[epoch] = {"D Loss":d_loss, "D Real Loss":d_real_loss,
-                                 "D Fake Loss":d_fake_loss, "G Loss":g_loss, "G Loss Multiplier":loss_multiplier,
-                                 "G Repeatition Loss":g_rep_loss, "G Validity Loss":g_val_loss}
+
             
+            print(train_tracking)
             save_smiles(epoch, sample_smiles, sample_classes, dataset, params, train_tracking)
 
     return train_tracking
@@ -595,7 +595,7 @@ if __name__ == "__main__":
                 transforms.Normalize(mean=[0.5], std=[0.5])
             ])  
     dataset = DrugLikeMolecules(transform=transform,
-                                file_path='chebi_selected_smiles.txt'
+                                file_path='chebi_selected_smiles_1of10_subset.txt'
                                 )
  
     criterion = nn.BCELoss()

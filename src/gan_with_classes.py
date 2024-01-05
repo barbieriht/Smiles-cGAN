@@ -249,7 +249,7 @@ class DrugLikeMolecules(Dataset):
     
 ############################# ENSEMBLE DISCRIMINATOR #######################
 class Generator(nn.Module):
-    def __init__(self, smiles_nodes, smiles_shape, classes_nodes, classes_shape, unique_classes):
+    def __init__(self, smiles_nodes, smiles_shape, classes_nodes, classes_shape, unique_classes, noise_dim):
         super().__init__()
         self.smiles_nodes = smiles_nodes
         self.smiles_shape = smiles_shape
@@ -257,11 +257,12 @@ class Generator(nn.Module):
         self.classes_nodes = classes_nodes
         self.classes_shape = classes_shape
         self.unique_classes = unique_classes
+        self.noise_dim = noise_dim
 
         self.label_emb = nn.Embedding(self.unique_classes, self.classes_nodes)
 
         self.model = nn.Sequential(
-            nn.Linear(NOISE_DIM + self.classes_nodes**2, 512),
+            nn.Linear(self.noise_dim + self.classes_nodes**2, 512),
             nn.BatchNorm1d(512),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Linear(512, 1024),
@@ -275,7 +276,7 @@ class Generator(nn.Module):
         )
 
     def forward(self, z, c):
-        z = z.view(z.size(0), NOISE_DIM)
+        z = z.view(z.size(0), self.noise_dim)
         c = c.view(c.size(0), self.classes_nodes)
 
         assert torch.all(c >= 0)
@@ -489,14 +490,17 @@ def translate_smiles(sample_smiles, dataset):
     processed_molecules = preprocessing_data(all_gen_smiles, inverse_dict)
     return [gen_smiles for gen_smiles in processed_molecules[0]]
 
-def save_smiles(epoch, sample_smiles, sample_classes, dataset, params, train_tracking):
+def save_state(model, epoch, sample_smiles, sample_classes, dataset, params, train_tracking):
+
 
     if not os.path.exists('generated_files'):
         os.mkdir('generated_files')
- 
-    for i in ("smiles", "classes"):
-        if not os.path.exists(f"./generated_files/{i}_lr{params['learning_rate']}_bpe{params['batch_per_epoca']}"):
-            os.mkdir(f"./generated_files/{i}_lr{params['learning_rate']}_bpe{params['batch_per_epoca']}")
+
+    if not os.path.exists(f"./generated_files/lr{params['learning_rate']}_bpe{params['batch_per_epoca']}"):
+        os.mkdir(f"./generated_files/lr{params['learning_rate']}_bpe{params['batch_per_epoca']}")
+    for i in ("smiles", "classes", "models"):
+        if not os.path.exists(f"./generated_files/lr{params['learning_rate']}_bpe{params['batch_per_epoca']}/{i}"):
+            os.mkdir(f"./generated_files/lr{params['learning_rate']}_bpe{params['batch_per_epoca']}/{i}")
 
     # Translating smiles
     processed_molecules = translate_smiles(sample_smiles, dataset)
@@ -507,23 +511,25 @@ def save_smiles(epoch, sample_smiles, sample_classes, dataset, params, train_tra
         this_classes = [dataset.classes_code[pos] for pos in cls.detach().cpu().numpy()]
         all_gen_classes.append(this_classes)
 
-    with open(f"./generated_files/smiles_lr{params['learning_rate']}_bpe{params['batch_per_epoca']}/cgan_{epoch}.txt", 'w') as f:
+    torch.save(model.state_dict(), f"./generated_files/lr{params['learning_rate']}_bpe{params['batch_per_epoca']}/models/cgan_{epoch}.pt")
+
+    with open(f"./generated_files/lr{params['learning_rate']}_bpe{params['batch_per_epoca']}/smiles/cgan_{epoch}.txt", 'w') as f:
         for molecule in processed_molecules:
             f.write(molecule)
             f.write('\n')
         f.close()
 
-    with open(f"./generated_files/classes_lr{params['learning_rate']}_bpe{params['batch_per_epoca']}/cgan_{epoch}.txt", 'w') as f:
+    with open(f"./generated_files/lr{params['learning_rate']}_bpe{params['batch_per_epoca']}/classes/cgan_{epoch}.txt", 'w') as f:
         for classes in all_gen_classes:
             f.write('@'.join(classes))
             f.write('\n')
         f.close()
 
-    with open(f"./generated_files/statistics_lr{params['learning_rate']}_bpe{params['batch_per_epoca']}.json", 'w') as f:
+    with open(f"./generated_files/lr{params['learning_rate']}_bpe{params['batch_per_epoca']}/statistics.json", 'w') as f:
         json.dump(train_tracking, f)
         f.close()
 
-    plot(f"./generated_files/statistics_lr{params['learning_rate']}_bpe{params['batch_per_epoca']}.json",
+    plot(f"./generated_files/lr{params['learning_rate']}_bpe{params['batch_per_epoca']}/statistics.json",
          batch_per_epoca=this_params["batch_per_epoca"], learning_rate=this_params["learning_rate"])
 
 
@@ -539,7 +545,6 @@ def train(params, criterion, batch_size=None, num_epochs = 1000, display_step = 
 
             if len(smiles) != batch_size or len(labels) != batch_size:
                 continue
-            labels_backup = labels
 
             real_smiles = Variable(smiles.to(torch.float)).to(device).squeeze(1)
             labels = Variable(labels.to(torch.long)).to(device).squeeze(1)
@@ -579,11 +584,9 @@ d_real_loss: {:.2f}, d_fake_loss: {:.2f}  |  g_disc_loss: {:.2f}, loss_multiplie
                 sample_classes = Variable(labels.to(torch.long)).to(device).squeeze(1)
                 break
             sample_smiles = generator(z, sample_classes)
-
-
             
             print(train_tracking)
-            save_smiles(epoch, sample_smiles, sample_classes, dataset, params, train_tracking)
+            save_state(generator, epoch, sample_smiles, sample_classes, dataset, params, train_tracking)
 
     return train_tracking
 
@@ -599,7 +602,7 @@ if __name__ == "__main__":
                                 )
  
     criterion = nn.BCELoss()
-    generator = Generator(dataset.smiles_nodes, dataset.smiles.shape, dataset.classes_nodes, dataset.classes.shape, dataset.unique_classes).to(device)
+    generator = Generator(dataset.smiles_nodes, dataset.smiles.shape, dataset.classes_nodes, dataset.classes.shape, dataset.unique_classes, NOISE_DIM).to(device)
     discriminator = Discriminator(dataset.smiles_nodes, dataset.smiles.shape, dataset.classes_nodes, dataset.classes.shape, dataset.unique_classes).to(device)
 
     params = {"learning_rate": [0.001,

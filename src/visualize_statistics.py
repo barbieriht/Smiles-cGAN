@@ -13,4 +13,4 @@ def plot(statistics, batch_per_epoca, learning_rate):
     plt.title('Losses Over Epochs')
     plt.legend()
     
-    plt.savefig(f'bpe{batch_per_epoca}_lr{learning_rate}.png')
+    plt.savefig(f'./generated_files/bpe{batch_per_epoca}_lr{learning_rate}.png')

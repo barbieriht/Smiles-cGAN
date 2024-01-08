@@ -1,9 +1,11 @@
-import os, re, time, json
+import os
+import re
 os.environ['TORCH_USE_CUDA_DSA'] = '1'
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 import pandas as pd
 import numpy as np
 import math
+import json
 import torch
 import torch.nn as nn
 from torchvision import transforms
@@ -536,7 +538,7 @@ def save_state(generator, discriminator, g_optimizer, d_optimizer,
         f.close()
 
     plot(f"./generated_files/lr{params['learning_rate']}_bpe{params['batch_per_epoca']}/statistics.json",
-         batch_per_epoca=this_params["batch_per_epoca"], learning_rate=this_params["learning_rate"])
+         batch_per_epoca=params["batch_per_epoca"], learning_rate=params["learning_rate"])
 
 
 def train(params, generator, discriminator, criterion, batch_size=None, num_epochs = 1000, display_step = 10, num_classes = 150):
@@ -548,8 +550,6 @@ def train(params, generator, discriminator, criterion, batch_size=None, num_epoc
     
     generator, g_optimizer, discriminator, d_optimizer, start_epoch = load_states(generator, g_optimizer, discriminator, d_optimizer, params)        
 
-    time.sleep(5)
-    
     for epoch in range(start_epoch, num_epochs):
         data_loader = torch.utils.data.DataLoader(dataset, batch_size, shuffle=True)
 
@@ -598,7 +598,7 @@ d_real_loss: {:.2f}, d_fake_loss: {:.2f}  |  g_disc_loss: {:.2f}, loss_multiplie
             sample_smiles = generator(z, sample_classes)
             
             print(train_tracking)
-            save_state(generator, discriminator, g_optimizer, d_optimizer, g_loss, d_loss,
+            save_state(generator, discriminator, g_optimizer, d_optimizer,
                        epoch, sample_smiles, sample_classes, dataset, params, train_tracking)
 
     return train_tracking

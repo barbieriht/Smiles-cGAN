@@ -5,3 +5,4 @@ torchvision==0.16.0
 matplotlib==3.7.1
 tqdm==4.65.0
 tensorflow==2.14.0
+rdkit==2023.9.3

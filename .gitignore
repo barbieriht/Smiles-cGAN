@@ -2,3 +2,6 @@ utils
 data
 .vscode
 __pycache__
+guacamol
+generated_files
+*.json

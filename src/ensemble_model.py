@@ -1,11 +1,9 @@
-import os
-import re
+import os, re, time, json
 os.environ['TORCH_USE_CUDA_DSA'] = '1'
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 import pandas as pd
 import numpy as np
 import math
-import json
 import torch
 import torch.nn as nn
 from torchvision import transforms
@@ -550,6 +548,8 @@ def train(params, generator, discriminator, criterion, batch_size=None, num_epoc
     
     generator, g_optimizer, discriminator, d_optimizer, start_epoch = load_states(generator, g_optimizer, discriminator, d_optimizer, params)        
 
+    time.sleep(5)
+    
     for epoch in range(start_epoch, num_epochs):
         data_loader = torch.utils.data.DataLoader(dataset, batch_size, shuffle=True)
 

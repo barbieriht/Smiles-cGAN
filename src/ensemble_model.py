@@ -426,6 +426,9 @@ def generator_train_step(batch_size, discriminator, generator, g_optimizer, crit
     
     z = Variable(torch.randn(batch_size, NOISE_DIM)).to(device)
     # fake_labels = Variable(torch.randint(0, num_classes, size=(labels_shape)).to(torch.long)).to(device)
+
+    data_loader = torch.utils.data.DataLoader(dataset, batch_size, shuffle=True)
+
     for _, labels in data_loader:
         fake_labels = Variable(labels.to(torch.long)).to(device).squeeze(1)
         break
@@ -465,6 +468,9 @@ def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, 
     # train with fake smiles
     z = Variable(torch.randn(batch_size, NOISE_DIM)).to(device)
     # fake_labels = Variable(torch.randint(0, num_classes, size=(labels_shape)).to(torch.long)).to(device)
+    
+    data_loader = torch.utils.data.DataLoader(dataset, batch_size, shuffle=True)
+
     for _, labels in data_loader:
         fake_labels = Variable(labels.to(torch.long)).to(device).squeeze(1)
         break
@@ -537,6 +543,8 @@ def train(params, criterion, batch_size=None, num_epochs = 1000, display_step = 
     g_optimizer = torch.optim.Adam(generator.parameters(), lr=10*params['learning_rate'])
     
     for epoch in range(start_epoch + 1, num_epochs):
+        data_loader = torch.utils.data.DataLoader(dataset, batch_size, shuffle=True)
+
         for i, (smiles, labels) in enumerate(data_loader):
 
             if len(smiles) != batch_size or len(labels) != batch_size:
@@ -595,6 +603,7 @@ def load_states(generator, discriminator, this_params):
     
     # Loading Generator State
     if os.path.isfile(f"./generated_files/lr{this_params['learning_rate']}_bpe{this_params['batch_per_epoca']}/generator.pt"):
+        print("Generator checkpoint found!")
         state_dict = generator.state_dict()
 
         checkpoint = torch.load(f"./generated_files/lr{this_params['learning_rate']}_bpe{this_params['batch_per_epoca']}/generator.pt")
@@ -609,6 +618,7 @@ def load_states(generator, discriminator, this_params):
 
     # Loading Discriminator State
     if os.path.isfile(f"./generated_files/lr{this_params['learning_rate']}_bpe{this_params['batch_per_epoca']}/discriminator.pt"):
+        print("Discriminator checkpoint found!")
         state_dict = discriminator.state_dict()
 
         checkpoint = torch.load(f"./generated_files/lr{this_params['learning_rate']}_bpe{this_params['batch_per_epoca']}/discriminator.pt")
@@ -626,7 +636,6 @@ def load_states(generator, discriminator, this_params):
         last_epoch = max([extract_single_integer_from_string(fn) for fn in files_names])
     else:
         last_epoch = 0
-    
     return generator, discriminator, last_epoch
 
 if __name__ == "__main__":
@@ -659,7 +668,5 @@ if __name__ == "__main__":
         print(this_params)
 
         generator, discriminator, last_epoch = load_states(generator, discriminator, this_params)        
-
-        data_loader = torch.utils.data.DataLoader(dataset, batch_size=this_params['batch_per_epoca'], shuffle=True)
 
         train(this_params, criterion, batch_size=this_params['batch_per_epoca'], num_epochs=5000, num_classes=dataset.unique_classes, start_epoch=last_epoch)    

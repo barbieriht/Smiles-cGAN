@@ -427,8 +427,6 @@ def generator_train_step(batch_size, discriminator, generator, g_optimizer, crit
     z = Variable(torch.randn(batch_size, NOISE_DIM)).to(device)
     # fake_labels = Variable(torch.randint(0, num_classes, size=(labels_shape)).to(torch.long)).to(device)
 
-    data_loader = torch.utils.data.DataLoader(dataset, batch_size, shuffle=True)
-
     for _, labels in data_loader:
         fake_labels = Variable(labels.to(torch.long)).to(device).squeeze(1)
         break
@@ -469,8 +467,6 @@ def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, 
     z = Variable(torch.randn(batch_size, NOISE_DIM)).to(device)
     # fake_labels = Variable(torch.randint(0, num_classes, size=(labels_shape)).to(torch.long)).to(device)
     
-    data_loader = torch.utils.data.DataLoader(dataset, batch_size, shuffle=True)
-
     for _, labels in data_loader:
         fake_labels = Variable(labels.to(torch.long)).to(device).squeeze(1)
         break
@@ -551,8 +547,6 @@ def train(params, generator, discriminator, criterion, batch_size=None, num_epoc
     generator, g_optimizer, discriminator, d_optimizer, start_epoch = load_states(generator, g_optimizer, discriminator, d_optimizer, params)        
 
     for epoch in range(start_epoch, num_epochs):
-        data_loader = torch.utils.data.DataLoader(dataset, batch_size, shuffle=True)
-
         for i, (smiles, labels) in enumerate(data_loader):
 
             if len(smiles) != batch_size or len(labels) != batch_size:
@@ -660,7 +654,11 @@ if __name__ == "__main__":
 
     generator_loader = torch.utils.data.DataLoader(dataset, batch_size=32, shuffle=True)
 
-    for pc in params_combinations:
+
+    for pc in params_combinations:    
+        
+        data_loader = torch.utils.data.DataLoader(dataset, this_params['batch_per_epoca'], shuffle=True)
+
         criterion = nn.BCELoss()
         generator = Generator(dataset.smiles_nodes, dataset.smiles.shape, dataset.classes_nodes, dataset.classes.shape, dataset.unique_classes, NOISE_DIM).to(device)
         discriminator = Discriminator(dataset.smiles_nodes, dataset.smiles.shape, dataset.classes_nodes, dataset.classes.shape, dataset.unique_classes).to(device)

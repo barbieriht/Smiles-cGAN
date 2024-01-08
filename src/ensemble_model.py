@@ -492,7 +492,8 @@ def translate_smiles(sample_smiles, dataset):
     processed_molecules = preprocessing_data(all_gen_smiles, inverse_dict)
     return [gen_smiles for gen_smiles in processed_molecules[0]]
 
-def save_state(generator, discriminator, epoch, sample_smiles, sample_classes, dataset, params, train_tracking):
+def save_state(generator, discriminator, g_optimizer, d_optimizer,
+               epoch, sample_smiles, sample_classes, dataset, params, train_tracking):
 
     if not os.path.exists('generated_files'):
         os.mkdir('generated_files')
@@ -512,8 +513,13 @@ def save_state(generator, discriminator, epoch, sample_smiles, sample_classes, d
         this_classes = [dataset.classes_code[pos] for pos in cls.detach().cpu().numpy()]
         all_gen_classes.append(this_classes)
 
-    torch.save(generator.state_dict(), f"./generated_files/lr{params['learning_rate']}_bpe{params['batch_per_epoca']}/generator.pt")
-    torch.save(discriminator.state_dict(), f"./generated_files/lr{params['learning_rate']}_bpe{params['batch_per_epoca']}/discriminator.pt")
+    # Saving Generator State
+    generator_state = {'state_dict': generator.state_dict(), 'optimizer': g_optimizer.state_dict()}
+    torch.save(generator_state.state_dict(), f"./generated_files/lr{params['learning_rate']}_bpe{params['batch_per_epoca']}/generator.pt")
+
+    # Saving Discriminator State
+    discriminator_state = {'state_dict': discriminator.state_dict(), 'optimizer': d_optimizer.state_dict()}
+    torch.save(discriminator_state.state_dict(), f"./generated_files/lr{params['learning_rate']}_bpe{params['batch_per_epoca']}/discriminator.pt")
 
     with open(f"./generated_files/lr{params['learning_rate']}_bpe{params['batch_per_epoca']}/smiles/cgan_{epoch}.txt", 'w') as f:
         for molecule in processed_molecules:
@@ -535,14 +541,16 @@ def save_state(generator, discriminator, epoch, sample_smiles, sample_classes, d
          batch_per_epoca=this_params["batch_per_epoca"], learning_rate=this_params["learning_rate"])
 
 
-def train(params, criterion, batch_size=None, num_epochs = 1000, display_step = 10, num_classes = 150, start_epoch = 0):
+def train(params, generator, discriminator, criterion, batch_size=None, num_epochs = 1000, display_step = 10, num_classes = 150):
 
     train_tracking = {}
 
     d_optimizer = torch.optim.SGD(discriminator.parameters(), lr=params['learning_rate'])
     g_optimizer = torch.optim.Adam(generator.parameters(), lr=10*params['learning_rate'])
     
-    for epoch in range(start_epoch + 1, num_epochs):
+    generator, g_optimizer, discriminator, d_optimizer, start_epoch = load_states(generator, g_optimizer, discriminator, d_optimizer, params)        
+
+    for epoch in range(start_epoch, num_epochs):
         data_loader = torch.utils.data.DataLoader(dataset, batch_size, shuffle=True)
 
         for i, (smiles, labels) in enumerate(data_loader):
@@ -590,53 +598,45 @@ d_real_loss: {:.2f}, d_fake_loss: {:.2f}  |  g_disc_loss: {:.2f}, loss_multiplie
             sample_smiles = generator(z, sample_classes)
             
             print(train_tracking)
-            save_state(generator, discriminator, epoch, sample_smiles, sample_classes, dataset, params, train_tracking)
+            save_state(generator, discriminator, g_optimizer, d_optimizer, g_loss, d_loss,
+                       epoch, sample_smiles, sample_classes, dataset, params, train_tracking)
 
     return train_tracking
 
 
-
-def load_states(generator, discriminator, this_params):
+def load_states(generator, g_optimizer, discriminator, d_optimizer, this_params):
     def extract_single_integer_from_string(input_string):
         matches = re.findall(r'\d+', input_string)
         return int(matches[0])
     
-    # Loading Generator State
-    if os.path.isfile(f"./generated_files/lr{this_params['learning_rate']}_bpe{this_params['batch_per_epoca']}/generator.pt"):
-        print("Generator checkpoint found!")
-        state_dict = generator.state_dict()
+    start_epoch = 0
 
-        checkpoint = torch.load(f"./generated_files/lr{this_params['learning_rate']}_bpe{this_params['batch_per_epoca']}/generator.pt")
-        avoid = ['fc.weight', 'fc.bias']
-        for key in checkpoint.keys():
-            if key in avoid or key not in state_dict.keys():
-                continue
-            if checkpoint[key].size() != state_dict[key].size():
-                continue
-            state_dict[key] = checkpoint[key]
-        generator.load_state_dict(state_dict)
+    g_file_name = f"./generated_files/lr{this_params['learning_rate']}_bpe{this_params['batch_per_epoca']}/generator.pt"
+    d_file_name=f"./generated_files/lr{this_params['learning_rate']}_bpe{this_params['batch_per_epoca']}/discriminator.pt"
+
+    # Loading Generator State
+    if os.path.isfile(g_file_name):
+        print("=> loading generator checkpoint '{}'".format(g_file_name))
+        checkpoint = torch.load(g_file_name)
+        generator.load_state_dict(checkpoint['state_dict'])
+        g_optimizer.load_state_dict(checkpoint['optimizer'])
+        print("=> loaded generator checkpoint '{}'".format(g_file_name))
 
     # Loading Discriminator State
-    if os.path.isfile(f"./generated_files/lr{this_params['learning_rate']}_bpe{this_params['batch_per_epoca']}/discriminator.pt"):
-        print("Discriminator checkpoint found!")
-        state_dict = discriminator.state_dict()
+    if os.path.isfile(d_file_name):
+        print("=> loading discriminator checkpoint '{}'".format(g_file_name))
+        checkpoint = torch.load(g_file_name)
+        discriminator.load_state_dict(checkpoint['state_dict'])
+        g_optimizer.load_state_dict(checkpoint['optimizer'])
+        print("=> loaded discriminator checkpoint '{}'".format(d_file_name))
 
-        checkpoint = torch.load(f"./generated_files/lr{this_params['learning_rate']}_bpe{this_params['batch_per_epoca']}/discriminator.pt")
-        avoid = ['fc.weight', 'fc.bias']
-        for key in checkpoint.keys():
-            if key in avoid or key not in state_dict.keys():
-                continue
-            if checkpoint[key].size() != state_dict[key].size():
-                continue
-            state_dict[key] = checkpoint[key]
-        discriminator.load_state_dict(state_dict)
-
+    # Loading Final Epoch
     if os.path.isdir(f"./generated_files/lr{this_params['learning_rate']}_bpe{this_params['batch_per_epoca']}/smiles"):
         files_names = os.listdir(f"./generated_files/lr{this_params['learning_rate']}_bpe{this_params['batch_per_epoca']}/smiles")
-        last_epoch = max([extract_single_integer_from_string(fn) for fn in files_names])
-    else:
-        last_epoch = 0
-    return generator, discriminator, last_epoch
+        start_epoch = max([extract_single_integer_from_string(fn) for fn in files_names]) + 1
+    print("=> loaded checkpoint from epoch '{}'".format(start_epoch))
+
+    return generator, g_optimizer, discriminator, d_optimizer, start_epoch
 
 if __name__ == "__main__":
     NOISE_DIM = 256
@@ -649,24 +649,24 @@ if __name__ == "__main__":
                                 file_path='chebi_selected_smiles.txt'
                                 )
  
-    criterion = nn.BCELoss()
-    generator = Generator(dataset.smiles_nodes, dataset.smiles.shape, dataset.classes_nodes, dataset.classes.shape, dataset.unique_classes, NOISE_DIM).to(device)
-    discriminator = Discriminator(dataset.smiles_nodes, dataset.smiles.shape, dataset.classes_nodes, dataset.classes.shape, dataset.unique_classes).to(device)
+
 
     params = {"learning_rate": [0.001,
                                 0.0001],
               "batch_per_epoca": [32,
                                   64]}
     
-    combinations = list(product(*params.values()))
+    params_combinations = list(product(*params.values()))
 
     generator_loader = torch.utils.data.DataLoader(dataset, batch_size=32, shuffle=True)
 
-    for param in combinations:
-        this_params = dict(zip(params.keys(), param))
+    for pc in params_combinations:
+        criterion = nn.BCELoss()
+        generator = Generator(dataset.smiles_nodes, dataset.smiles.shape, dataset.classes_nodes, dataset.classes.shape, dataset.unique_classes, NOISE_DIM).to(device)
+        discriminator = Discriminator(dataset.smiles_nodes, dataset.smiles.shape, dataset.classes_nodes, dataset.classes.shape, dataset.unique_classes).to(device)
+        
+        this_params = dict(zip(params.keys(), pc))
 
         print(this_params)
 
-        generator, discriminator, last_epoch = load_states(generator, discriminator, this_params)        
-
-        train(this_params, criterion, batch_size=this_params['batch_per_epoca'], num_epochs=5000, num_classes=dataset.unique_classes, start_epoch=last_epoch)    
+        train(this_params, generator, discriminator, criterion, batch_size=this_params['batch_per_epoca'], num_epochs=5000, num_classes=dataset.unique_classes)    

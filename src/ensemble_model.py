@@ -511,11 +511,11 @@ def save_state(generator, discriminator, g_optimizer, d_optimizer,
 
     # Saving Generator State
     generator_state = {'state_dict': generator.state_dict(), 'optimizer': g_optimizer.state_dict()}
-    torch.save(generator_state.state_dict(), f"./generated_files/lr{params['learning_rate']}_bpe{params['batch_per_epoca']}/generator.pt")
+    torch.save(generator_state, f"./generated_files/lr{params['learning_rate']}_bpe{params['batch_per_epoca']}/generator.pt")
 
     # Saving Discriminator State
     discriminator_state = {'state_dict': discriminator.state_dict(), 'optimizer': d_optimizer.state_dict()}
-    torch.save(discriminator_state.state_dict(), f"./generated_files/lr{params['learning_rate']}_bpe{params['batch_per_epoca']}/discriminator.pt")
+    torch.save(discriminator_state, f"./generated_files/lr{params['learning_rate']}_bpe{params['batch_per_epoca']}/discriminator.pt")
 
     with open(f"./generated_files/lr{params['learning_rate']}_bpe{params['batch_per_epoca']}/smiles/cgan_{epoch}.txt", 'w') as f:
         for molecule in processed_molecules:
@@ -539,7 +539,11 @@ def save_state(generator, discriminator, g_optimizer, d_optimizer,
 
 def train(params, generator, discriminator, criterion, batch_size=None, num_epochs = 1000, display_step = 10, num_classes = 150):
 
-    train_tracking = {}
+    if os.path.isfile(f"./generated_files/lr{params['learning_rate']}_bpe{params['batch_per_epoca']}/statistics.json"):
+        with open(f"./generated_files/lr{params['learning_rate']}_bpe{params['batch_per_epoca']}/statistics.json", 'r') as file:
+            train_tracking = json.load(file)
+    else:
+        train_tracking = {}
 
     d_optimizer = torch.optim.SGD(discriminator.parameters(), lr=params['learning_rate'])
     g_optimizer = torch.optim.Adam(generator.parameters(), lr=10*params['learning_rate'])
@@ -618,10 +622,10 @@ def load_states(generator, g_optimizer, discriminator, d_optimizer, this_params)
 
     # Loading Discriminator State
     if os.path.isfile(d_file_name):
-        print("=> loading discriminator checkpoint '{}'".format(g_file_name))
-        checkpoint = torch.load(g_file_name)
+        print("=> loading discriminator checkpoint '{}'".format(d_file_name))
+        checkpoint = torch.load(d_file_name)
         discriminator.load_state_dict(checkpoint['state_dict'])
-        g_optimizer.load_state_dict(checkpoint['optimizer'])
+        d_optimizer.load_state_dict(checkpoint['optimizer'])
         print("=> loaded discriminator checkpoint '{}'".format(d_file_name))
 
     # Loading Final Epoch
@@ -657,7 +661,6 @@ if __name__ == "__main__":
 
     for pc in params_combinations:    
         
-        data_loader = torch.utils.data.DataLoader(dataset, this_params['batch_per_epoca'], shuffle=True)
 
         criterion = nn.BCELoss()
         generator = Generator(dataset.smiles_nodes, dataset.smiles.shape, dataset.classes_nodes, dataset.classes.shape, dataset.unique_classes, NOISE_DIM).to(device)
@@ -666,5 +669,5 @@ if __name__ == "__main__":
         this_params = dict(zip(params.keys(), pc))
 
         print(this_params)
-
+        data_loader = torch.utils.data.DataLoader(dataset, this_params['batch_per_epoca'], shuffle=True)
         train(this_params, generator, discriminator, criterion, batch_size=this_params['batch_per_epoca'], num_epochs=5000, num_classes=dataset.unique_classes)    

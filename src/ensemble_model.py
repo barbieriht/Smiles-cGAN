@@ -210,39 +210,7 @@ class DrugLikeMolecules(Dataset):
             sml = self.transform(sml)
 
         return sml, labels
-    
-############################# SIMPLE DISCRIMINATOR #######################
-# class Discriminator(nn.Module):
-#     def __init__(self, smiles_nodes, smiles_shape):
-#         super().__init__()
-#         self.smiles_nodes = smiles_nodes
-#         self.smiles_shape = smiles_shape
 
-#         self.model = nn.Sequential(
-#             nn.Linear(self.smiles_nodes, 1024),
-#             nn.BatchNorm1d(1024),
-#             nn.LeakyReLU(0.2, inplace=True),
-#             nn.Dropout(0.3),
-#             nn.Linear(1024, 512),
-#             nn.BatchNorm1d(512),
-#             nn.LeakyReLU(0.2, inplace=True),
-#             nn.Dropout(0.3),
-#             nn.Linear(512, 256),
-#             nn.BatchNorm1d(256),
-#             nn.LeakyReLU(0.2, inplace=True),
-#             nn.Dropout(0.3),
-#             nn.Linear(256, 1),
-#             nn.Sigmoid()
-#         )
-
-#     def forward(self, x):
-#       x = x.view(x.size(0), self.smiles_nodes)
-
-#       x = torch.cat([x], 1)
-#       out = self.model(x.float())
-#       return out.squeeze()
-    
-############################# ENSEMBLE DISCRIMINATOR #######################
 class Generator(nn.Module):
     def __init__(self, smiles_nodes, smiles_shape, classes_shape, unique_classes, noise_dim, MIN_DIM):
         super().__init__()
@@ -404,7 +372,7 @@ def check_repeated(data_list):
 def generator_train_step(batch_size, discriminator, generator, g_optimizer, criterion, labels, num_classes):
     g_optimizer.zero_grad()
     
-    z = Variable(torch.randn(batch_size, NOISE_DIM)).to(device)
+    z = Variable(torch.normal(mean=0, std=1, size=(batch_size, NOISE_DIM))).to(device)
 
     fake_labels = Variable(torch.randint(0, num_classes, size=labels.shape).to(torch.long)).to(device)
 
@@ -438,8 +406,9 @@ def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, 
     # train with real smiles
 
     real_validity = discriminator(real_smiles, labels)
-    real_loss = criterion(real_validity, Variable(torch.ones(batch_size)).to(device))
+    real_validity = torch.where(real_validity > 0.9, torch.tensor(0.9), real_validity)
 
+    real_loss = criterion(real_validity, Variable(torch.ones(batch_size)).to(device))
 
     # train with fake smiles
     z = Variable(torch.randn(batch_size, NOISE_DIM)).to(device)
@@ -452,15 +421,10 @@ def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, 
 
     fake_loss = criterion(fake_validity, Variable(torch.zeros(batch_size)).to(device))
 
-    translated_smiles = translate_smiles(fake_smiles, dataset)
-
-    d_smiles_validity_loss = np.mean([float(0) if Chem.MolFromSmiles(this) == None else float(1) for this in translated_smiles])
-    untranslatable_loss = math.log(1 + d_smiles_validity_loss) / math.log(2)
-
-    d_loss = real_loss + fake_loss + untranslatable_loss
+    d_loss = real_loss + fake_loss
     d_loss.backward()
     d_optimizer.step()
-    return d_loss.data.item(), real_loss.data.item(),  fake_loss.data.item(), untranslatable_loss
+    return d_loss.data.item(), real_loss.data.item(),  fake_loss.data.item()
 
 def translate_smiles(sample_smiles, dataset):
     all_gen_smiles = []
@@ -476,11 +440,12 @@ def save_state(generator, discriminator, g_optimizer, d_optimizer,
     if not os.path.exists('generated_files'):
         os.mkdir('generated_files')
 
-    if not os.path.exists(f"./generated_files/lr{LR}_bpe{BPE}"):
-        os.mkdir(f"./generated_files/lr{LR}_bpe{BPE}")
+    folder_name = f"./generated_files/{MIN_DIM}lr{LR}g{GLRM}_bpe{BPE}"
+    if not os.path.exists(folder_name):
+        os.mkdir(folder_name)
     for i in ("smiles", "classes", "models"):
-        if not os.path.exists(f"./generated_files/lr{LR}_bpe{BPE}/{i}"):
-            os.mkdir(f"./generated_files/lr{LR}_bpe{BPE}/{i}")
+        if not os.path.exists(f"{folder_name}/{i}"):
+            os.mkdir(f"{folder_name}/{i}")
 
     # Translating smiles
     processed_molecules = translate_smiles(sample_smiles, dataset)
@@ -492,45 +457,46 @@ def save_state(generator, discriminator, g_optimizer, d_optimizer,
 
     # Saving Generator State
     generator_state = {'state_dict': generator.state_dict(), 'optimizer': g_optimizer.state_dict()}
-    torch.save(generator_state, f"./generated_files/lr{LR}_bpe{BPE}/generator.pt")
+    torch.save(generator_state, f"{folder_name}/generator.pt")
 
     # Saving Discriminator State
     discriminator_state = {'state_dict': discriminator.state_dict(), 'optimizer': d_optimizer.state_dict()}
-    torch.save(discriminator_state, f"./generated_files/lr{LR}_bpe{BPE}/discriminator.pt")
+    torch.save(discriminator_state, f"{folder_name}/discriminator.pt")
 
-    with open(f"./generated_files/lr{LR}_bpe{BPE}/smiles/cgan_{epoch}.txt", 'w') as f:
+    with open(f"{folder_name}/smiles/cgan_{epoch}.txt", 'w') as f:
         for molecule in processed_molecules:
             f.write(molecule)
             f.write('\n')
         f.close()
 
-    with open(f"./generated_files/lr{LR}_bpe{BPE}/classes/cgan_{epoch}.txt", 'w') as f:
+    with open(f"{folder_name}/classes/cgan_{epoch}.txt", 'w') as f:
         for classes in all_gen_classes:
             f.write('@'.join(classes))
             f.write('\n')
         f.close()
 
-    with open(f"./generated_files/lr{LR}_bpe{BPE}/statistics.json", 'w') as f:
+    with open(f"{folder_name}/statistics.json", 'w') as f:
         json.dump(train_tracking, f)
         f.close()
 
-    plot(f"./generated_files/lr{LR}_bpe{BPE}/statistics.json",
-         batch_per_epoca=params["batch_per_epoca"], learning_rate=params["learning_rate"])
+    plot(f"{folder_name}/statistics.json", path_to_save=folder_name)
 
 
 def train(params, generator, discriminator, criterion, batch_size=None, num_epochs = 1000, display_step = 10, num_classes = 150):
 
+    MIN_DIM = params["min_dim"]
     BPE = params["batch_per_epoca"]
     LR = params["learning_rate"]
+    GLRM = params["generator_lr_multiplier"]
 
-    if os.path.isfile(f"./generated_files/lr{LR}_bpe{BPE}/statistics.json"):
-        with open(f"./generated_files/lr{LR}_bpe{BPE}/statistics.json", 'r') as file:
+    if os.path.isfile(f"./generated_files/{MIN_DIM}lr{LR}g{GLRM}_bpe{BPE}/statistics.json"):
+        with open(f"./generated_files/{MIN_DIM}lr{LR}g{GLRM}_bpe{BPE}/statistics.json", 'r') as file:
             train_tracking = json.load(file)
     else:
         train_tracking = {}
 
-    d_optimizer = torch.optim.SGD(discriminator.parameters(), lr=LR)
-    g_optimizer = torch.optim.Adam(generator.parameters(), lr=LR)
+    d_optimizer = torch.optim.Adam(discriminator.parameters(), lr=LR)
+    g_optimizer = torch.optim.Adam(generator.parameters(), lr=GLRM*LR)
     
     generator, g_optimizer, discriminator, d_optimizer, start_epoch = load_states(generator, g_optimizer, discriminator, d_optimizer, params)        
 
@@ -550,7 +516,7 @@ def train(params, generator, discriminator, criterion, batch_size=None, num_epoc
                 batch_size = real_smiles.size(0)
                 
 
-            d_loss, d_real_loss, d_fake_loss,  d_untranslatable_loss = discriminator_train_step(batch_size, discriminator,
+            d_loss, d_real_loss, d_fake_loss = discriminator_train_step(batch_size, discriminator,
                                                 generator, d_optimizer, criterion, real_smiles,
                                                 labels, num_classes)
 
@@ -558,14 +524,14 @@ def train(params, generator, discriminator, criterion, batch_size=None, num_epoc
                                            criterion, labels, num_classes)
             
             print('Training model >> Epoch: [{}/{}] -- Batch: [{}]\nd_loss: {:.2f}                                                     |  g_loss: {:.2f}\n\
-d_real_loss: {:.2f}, d_fake_loss: {:.2f}, d_untranslatable_loss: {:.2f}  |  g_disc_loss: {:.2f}, g_rep_loss: {:.2f}, g_untranslatable_loss: {:.2f}'.format(
-                        epoch, num_epochs, i, d_loss, g_loss, d_real_loss, d_fake_loss, d_untranslatable_loss, g_disc_loss, g_rep_loss, g_untranslatable_loss))
+d_real_loss: {:.2f}, d_fake_loss: {:.2f}  |  g_disc_loss: {:.2f}, g_rep_loss: {:.2f}, g_untranslatable_loss: {:.2f}'.format(
+                        epoch, num_epochs, i, d_loss, g_loss, d_real_loss, d_fake_loss, g_disc_loss, g_rep_loss, g_untranslatable_loss))
 
         generator.eval()
 
         train_tracking[epoch] = {"D Loss":d_loss, "D Real Loss":d_real_loss,
-                                "D Fake Loss":d_fake_loss, "D Untranslatable Loss":d_untranslatable_loss,
-                                "G Loss":g_loss, "G Repeatition Loss":g_rep_loss, "G Untranslatable Loss":g_untranslatable_loss,}
+                                "D Fake Loss":d_fake_loss, "G Loss":g_loss,
+                                "G Repeatition Loss":g_rep_loss, "G Validity Loss":g_untranslatable_loss,}
         
         if epoch % display_step == 0:
 
@@ -585,13 +551,17 @@ def load_states(generator, g_optimizer, discriminator, d_optimizer, this_params)
         matches = re.findall(r'\d+', input_string)
         return int(matches[0])
     
+    MIN_DIM = this_params["min_dim"]
     BPE = this_params["batch_per_epoca"]
     LR = this_params["learning_rate"]
+    GLRM = this_params["generator_lr_multiplier"]
+
+    folder_name = f"./generated_files/{MIN_DIM}lr{LR}g{GLRM}_bpe{BPE}"
 
     start_epoch = 0
 
-    g_file_name = f"./generated_files/lr{LR}_bpe{BPE}/generator.pt"
-    d_file_name=f"./generated_files/lr{LR}_bpe{BPE}/discriminator.pt"
+    g_file_name = f"{folder_name}/generator.pt"
+    d_file_name=f"{folder_name}/discriminator.pt"
 
     # Loading Generator State
     if os.path.isfile(g_file_name):
@@ -610,8 +580,8 @@ def load_states(generator, g_optimizer, discriminator, d_optimizer, this_params)
         print("=> loaded discriminator checkpoint '{}'".format(d_file_name))
 
     # Loading Final Epoch
-    if os.path.isdir(f"./generated_files/lr{LR}_bpe{BPE}/smiles"):
-        files_names = os.listdir(f"./generated_files/lr{LR}_bpe{BPE}/smiles")
+    if os.path.isdir(f"{folder_name}/smiles"):
+        files_names = os.listdir(f"{folder_name}/smiles")
         start_epoch = max([extract_single_integer_from_string(fn) for fn in files_names]) + 1
     print("=> loaded checkpoint from epoch '{}'".format(start_epoch))
 
@@ -628,11 +598,10 @@ if __name__ == "__main__":
                                 file_path='chebi_selected_smiles_1of8_subset.txt'
                                 )
 
-    params = {"learning_rate": [0.001,
-                                0.0001],
-              "batch_per_epoca": [128,
-                                  64,
-                                  32],
+    params = {"learning_rate": [0.0001],
+              "generator_lr_multiplier": [5, 3, 1],
+              "batch_per_epoca": [256,
+                                  128],
               "min_dim":[256,
                          512]}
     
@@ -647,6 +616,7 @@ if __name__ == "__main__":
         MIN_DIM = this_params["min_dim"]
         BPE = this_params["batch_per_epoca"]
         LR = this_params["learning_rate"]
+        GLRM = this_params["generator_lr_multiplier"]
 
         criterion = nn.BCELoss()
         generator = Generator(dataset.smiles_nodes, dataset.smiles.shape, dataset.classes.shape, dataset.unique_classes, NOISE_DIM, MIN_DIM).to(device)

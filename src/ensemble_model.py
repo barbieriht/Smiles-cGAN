@@ -411,7 +411,7 @@ def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, 
     real_loss = criterion(real_validity, Variable(torch.ones(batch_size)).to(device))
 
     # train with fake smiles
-    z = Variable(torch.randn(batch_size, NOISE_DIM)).to(device)
+    z = Variable(torch.normal(mean=0, std=1, size=(batch_size, NOISE_DIM))).to(device)
     
     fake_labels = Variable(torch.randint(0, num_classes, size=labels.shape).to(torch.long)).to(device)
 
@@ -535,11 +535,10 @@ d_real_loss: {:.2f}, d_fake_loss: {:.2f}  |  g_disc_loss: {:.2f}, g_rep_loss: {:
         
         if epoch % display_step == 0:
 
-            z = Variable(torch.randn(32, NOISE_DIM)).to(device)
+            z = Variable(torch.normal(mean=0, std=1, size=(32, NOISE_DIM))).to(device)
             sample_classes = Variable(torch.randint(0, num_classes, size=(32,)).to(torch.long)).to(device)
             sample_smiles = generator(z, sample_classes)
             
-            print(train_tracking)
             save_state(generator, discriminator, g_optimizer, d_optimizer,
                        epoch, sample_smiles, sample_classes, dataset, params, train_tracking)
 

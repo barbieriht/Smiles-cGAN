@@ -502,7 +502,7 @@ def train(params, generator, discriminator, criterion, batch_size=None, num_epoc
 
     for epoch in range(start_epoch, num_epochs):
         this_epock_tracking = {"D Loss":[], "D Real Loss":[], "D Fake Loss":[], "G Loss":[],
-                                 "G Loss Multiplier":[], "G Repeatition Loss":[], "G Validity Loss":[]}
+                                 "G Repeatition Loss":[], "G Untranslatable Loss":[]}
         
         for i, (smiles, labels) in enumerate(data_loader):
 
@@ -533,7 +533,7 @@ def train(params, generator, discriminator, criterion, batch_size=None, num_epoc
             this_epock_tracking["G Untranslatable Loss"].append(g_untranslatable_loss)
             this_epock_tracking["G Repeatition Loss"].append(g_rep_loss)
             print('Training model >> Epoch: [{}/{}] -- Batch: [{}]\nd_loss: {:.2f}                          |  g_loss: {:.2f}\n\
-d_real_loss: {:.2f}, d_fake_loss: {:.2f}  |  g_disc_loss: {:.2f}, g_untranslatable_loss: {:.2f}, g_rep_loss: {:.2f}, g_val_loss: {:.2f}'.format(
+d_real_loss: {:.2f}, d_fake_loss: {:.2f}  |  g_disc_loss: {:.2f}, g_untranslatable_loss: {:.2f}, g_rep_loss: {:.2f}'.format(
                         epoch, num_epochs, i, d_loss, g_loss, d_real_loss, d_fake_loss, g_disc_loss, g_untranslatable_loss, g_rep_loss))
 
         generator.eval()
@@ -542,9 +542,8 @@ d_real_loss: {:.2f}, d_fake_loss: {:.2f}  |  g_disc_loss: {:.2f}, g_untranslatab
                                 "D Real Loss":np.mean(this_epock_tracking["D Real Loss"]),
                                 "D Fake Loss":np.mean(this_epock_tracking["D Fake Loss"]),
                                 "G Loss":np.mean(this_epock_tracking["G Loss"]),
-                                "G Loss Multiplier":np.mean(this_epock_tracking["G Loss Multiplier"]),
                                 "G Repeatition Loss":np.mean(this_epock_tracking["G Repeatition Loss"]),
-                                "G Validity Loss":np.mean(this_epock_tracking["G Validity Loss"])}
+                                "G Untranslatable Loss":np.mean(this_epock_tracking["G Untranslatable Loss"])}
         
         if epoch % display_step == 0:
             # print('Saving smiles >> Epoch: [{}] --- d_loss: {:.2f}  |  g_loss: {:.2f}\n\
@@ -552,9 +551,7 @@ d_real_loss: {:.2f}, d_fake_loss: {:.2f}  |  g_disc_loss: {:.2f}, g_untranslatab
             #                         epoch, d_loss, g_loss, d_real_loss, d_fake_loss, loss_multiplier, g_rep_loss, g_val_loss, g_disc_loss))
 
             z = Variable(torch.randn(32, NOISE_DIM)).to(device)
-            for _, labels in generator_loader:
-                sample_classes = Variable(labels.to(torch.long)).to(device).squeeze(1)
-                break
+            sample_classes = Variable(torch.randint(0, num_classes, size=(32,)).to(torch.long)).to(device)
             sample_smiles = generator(z, sample_classes)
             
             save_state(generator, discriminator, g_optimizer, d_optimizer,
@@ -619,7 +616,8 @@ if __name__ == "__main__":
               "generator_lr_multiplier": [5, 3, 1],
               "batch_per_epoca": [256,
                                   128],
-              "min_dim":[256, 128]}
+              "min_dim":[256,
+                         128]}
     
     params_combinations = list(product(*params.values()))
 

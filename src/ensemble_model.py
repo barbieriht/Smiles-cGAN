@@ -600,10 +600,6 @@ d_real_loss: {:.2f}, d_fake_loss: {:.2f}  |  g_disc_loss: {:.2f}, loss_multiplie
                                 "G Validity Loss":np.mean(this_epock_tracking["G Validity Loss"])}
         
         if epoch % display_step == 0:
-            # print('Saving smiles >> Epoch: [{}] --- d_loss: {:.2f}  |  g_loss: {:.2f}\n\
-            #       d_real_loss: {:.2f}, d_fake_loss: {:.2f} | loss_multiplier: {:.2f}, g_rep_loss: {:.2f}, g_val_loss: {:.2f}, g_disc_loss: {:.2f}'.format(
-            #                         epoch, d_loss, g_loss, d_real_loss, d_fake_loss, loss_multiplier, g_rep_loss, g_val_loss, g_disc_loss))
-
             z = Variable(torch.randn(32, NOISE_DIM)).to(device)
             for _, labels in generator_loader:
                 sample_classes = Variable(labels.to(torch.long)).to(device).squeeze(1)

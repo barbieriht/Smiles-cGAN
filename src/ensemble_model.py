@@ -601,8 +601,7 @@ if __name__ == "__main__":
               "generator_lr_multiplier": [5, 3, 1],
               "batch_per_epoca": [256,
                                   128],
-              "min_dim":[256,
-                         512]}
+              "min_dim":[256, 128]}
     
     params_combinations = list(product(*params.values()))
 
@@ -623,4 +622,4 @@ if __name__ == "__main__":
 
 
         data_loader = torch.utils.data.DataLoader(dataset, BPE, shuffle=True)
-        train(this_params, generator, discriminator, criterion, batch_size=BPE, num_epochs=500, num_classes=dataset.unique_classes)    
+        train(this_params, generator, discriminator, criterion, batch_size=BPE, num_epochs=400, num_classes=dataset.unique_classes)    

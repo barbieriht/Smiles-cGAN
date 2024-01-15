@@ -501,6 +501,9 @@ def train(params, generator, discriminator, criterion, batch_size=None, num_epoc
     generator, g_optimizer, discriminator, d_optimizer, start_epoch = load_states(generator, g_optimizer, discriminator, d_optimizer, params)        
 
     for epoch in range(start_epoch, num_epochs):
+        this_epock_tracking = {"D Loss":[], "D Real Loss":[], "D Fake Loss":[], "G Loss":[],
+                                 "G Loss Multiplier":[], "G Repeatition Loss":[], "G Validity Loss":[]}
+        
         for i, (smiles, labels) in enumerate(data_loader):
 
             if len(smiles) != batch_size or len(labels) != batch_size:
@@ -523,20 +526,35 @@ def train(params, generator, discriminator, criterion, batch_size=None, num_epoc
             g_loss, g_rep_loss, g_disc_loss, g_untranslatable_loss  = generator_train_step(batch_size, discriminator, generator, g_optimizer,
                                            criterion, labels, num_classes)
             
-            print('Training model >> Epoch: [{}/{}] -- Batch: [{}]\nd_loss: {:.2f}                                                     |  g_loss: {:.2f}\n\
-d_real_loss: {:.2f}, d_fake_loss: {:.2f}  |  g_disc_loss: {:.2f}, g_rep_loss: {:.2f}, g_untranslatable_loss: {:.2f}'.format(
-                        epoch, num_epochs, i, d_loss, g_loss, d_real_loss, d_fake_loss, g_disc_loss, g_rep_loss, g_untranslatable_loss))
+            this_epock_tracking["D Loss"].append(d_loss)
+            this_epock_tracking["D Real Loss"].append(d_real_loss)
+            this_epock_tracking["D Fake Loss"].append(d_fake_loss)
+            this_epock_tracking["G Loss"].append(g_loss)
+            this_epock_tracking["G Untranslatable Loss"].append(g_untranslatable_loss)
+            this_epock_tracking["G Repeatition Loss"].append(g_rep_loss)
+            print('Training model >> Epoch: [{}/{}] -- Batch: [{}]\nd_loss: {:.2f}                          |  g_loss: {:.2f}\n\
+d_real_loss: {:.2f}, d_fake_loss: {:.2f}  |  g_disc_loss: {:.2f}, g_untranslatable_loss: {:.2f}, g_rep_loss: {:.2f}, g_val_loss: {:.2f}'.format(
+                        epoch, num_epochs, i, d_loss, g_loss, d_real_loss, d_fake_loss, g_disc_loss, g_untranslatable_loss, g_rep_loss))
 
         generator.eval()
 
-        train_tracking[epoch] = {"D Loss":d_loss, "D Real Loss":d_real_loss,
-                                "D Fake Loss":d_fake_loss, "G Loss":g_loss,
-                                "G Repeatition Loss":g_rep_loss, "G Validity Loss":g_untranslatable_loss,}
+        train_tracking[epoch] = {"D Loss":np.mean(this_epock_tracking["D Loss"]),
+                                "D Real Loss":np.mean(this_epock_tracking["D Real Loss"]),
+                                "D Fake Loss":np.mean(this_epock_tracking["D Fake Loss"]),
+                                "G Loss":np.mean(this_epock_tracking["G Loss"]),
+                                "G Loss Multiplier":np.mean(this_epock_tracking["G Loss Multiplier"]),
+                                "G Repeatition Loss":np.mean(this_epock_tracking["G Repeatition Loss"]),
+                                "G Validity Loss":np.mean(this_epock_tracking["G Validity Loss"])}
         
         if epoch % display_step == 0:
+            # print('Saving smiles >> Epoch: [{}] --- d_loss: {:.2f}  |  g_loss: {:.2f}\n\
+            #       d_real_loss: {:.2f}, d_fake_loss: {:.2f} | loss_multiplier: {:.2f}, g_rep_loss: {:.2f}, g_val_loss: {:.2f}, g_disc_loss: {:.2f}'.format(
+            #                         epoch, d_loss, g_loss, d_real_loss, d_fake_loss, loss_multiplier, g_rep_loss, g_val_loss, g_disc_loss))
 
-            z = Variable(torch.normal(mean=0, std=1, size=(32, NOISE_DIM))).to(device)
-            sample_classes = Variable(torch.randint(0, num_classes, size=(32,)).to(torch.long)).to(device)
+            z = Variable(torch.randn(32, NOISE_DIM)).to(device)
+            for _, labels in generator_loader:
+                sample_classes = Variable(labels.to(torch.long)).to(device).squeeze(1)
+                break
             sample_smiles = generator(z, sample_classes)
             
             save_state(generator, discriminator, g_optimizer, d_optimizer,

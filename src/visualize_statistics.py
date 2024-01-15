@@ -2,7 +2,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 
-def plot(statistics, batch_per_epoca, learning_rate):
+def plot(statistics, path_to_save):
     df = pd.read_json(statistics).transpose()
 
     plt.figure(figsize=(10, 6))
@@ -22,4 +22,4 @@ def plot(statistics, batch_per_epoca, learning_rate):
     plt.title('Losses Over Epochs')
     plt.legend()
     
-    plt.savefig(f'./generated_files/lr{learning_rate}_bpe{batch_per_epoca}/plot.png')
+    plt.savefig(f'{path_to_save}/plot.png')

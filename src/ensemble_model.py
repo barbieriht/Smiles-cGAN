@@ -223,32 +223,34 @@ class Generator(nn.Module):
 
         self.label_emb = nn.Embedding(self.unique_classes, self.unique_classes)
 
-        self.model = nn.Sequential(
-            nn.Linear(self.noise_dim + self.unique_classes, MIN_DIM),
-            nn.BatchNorm1d(MIN_DIM),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(MIN_DIM, MIN_DIM*2),
+        self.lstm = nn.LSTM(input_size=self.noise_dim + self.unique_classes,
+                            hidden_size=MIN_DIM*2,
+                            num_layers=2,
+                            batch_first=True)
+
+        self.linear_layers = nn.Sequential(
             nn.BatchNorm1d(MIN_DIM*2),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(MIN_DIM*2, MIN_DIM*4),
-            nn.BatchNorm1d(MIN_DIM*4),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(MIN_DIM*4, smiles_nodes),
+            nn.Linear(MIN_DIM*2, smiles_nodes),
             nn.Tanh()
         )
 
     def forward(self, z, c):
-        z = z.view(z.size(0), self.noise_dim)
+        z = z.view(z.size(0), 1, self.noise_dim)  # Add time dimension
 
         assert torch.all(c >= 0)
         assert torch.all(c < self.label_emb.num_embeddings)
 
-        c = self.label_emb(c.to(torch.int).to(device))
+        c = self.label_emb(c.to(torch.int).to(z.device))
 
-        x = torch.cat([z, c], 1)
-        smile_out = self.model(x)
-        
-        return smile_out.view(-1, self.smiles_nodes)
+        lstm_out, _ = self.lstm(torch.cat([z, c.unsqueeze(1).expand(-1, z.size(1), -1)], dim=-1))
+
+        # Extract the last time step output from the LSTM
+        lstm_out = lstm_out[:, -1, :]
+
+        linear_out = self.linear_layers(lstm_out)
+
+        return linear_out.view(-1, self.smiles_nodes)
 
 class Discriminator(nn.Module):
     def __init__(self, smiles_nodes, smiles_shape, classes_shape, unique_classes, MIN_DIM):
@@ -263,49 +265,49 @@ class Discriminator(nn.Module):
         self.label_emb = nn.Embedding(self.unique_classes, self.unique_classes)
 
         self.smile_input = nn.Sequential(
-            nn.Linear(self.smiles_nodes + self.unique_classes, MIN_DIM*4),
-            nn.BatchNorm1d(MIN_DIM*4),
+            nn.Linear(self.smiles_nodes + self.unique_classes, MIN_DIM),
+            nn.BatchNorm1d(MIN_DIM),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Dropout(0.3)
         )
 
         self.parallel1_ = nn.Sequential(
-            nn.Linear(MIN_DIM*4, MIN_DIM*2),
-            nn.BatchNorm1d(MIN_DIM*2),
+            nn.Linear(MIN_DIM, MIN_DIM//2),
+            nn.BatchNorm1d(MIN_DIM//2),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Dropout(0.3),
 
         )
 
         self.parallel_1 = nn.Sequential(
-            nn.Linear(MIN_DIM*4, MIN_DIM*2),
-            nn.BatchNorm1d(MIN_DIM*2),
+            nn.Linear(MIN_DIM, MIN_DIM//2),
+            nn.BatchNorm1d(MIN_DIM//2),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Dropout(0.3),
-            nn.Linear(MIN_DIM*2, MIN_DIM),
-            nn.BatchNorm1d(MIN_DIM),
+            nn.Linear(MIN_DIM//2, MIN_DIM//4),
+            nn.BatchNorm1d(MIN_DIM//4),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Dropout(0.3),
-            nn.Linear(MIN_DIM, 1)
+            nn.Linear(MIN_DIM//4, 1)
         )
 
         self.parallel2_ = nn.Sequential(
-            nn.Linear(MIN_DIM*2, MIN_DIM),
-            nn.BatchNorm1d(MIN_DIM),
+            nn.Linear(MIN_DIM//2, MIN_DIM//4),
+            nn.BatchNorm1d(MIN_DIM//4),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Dropout(0.3)
         )
 
         self.parallel_2 = nn.Sequential(
-            nn.Linear(MIN_DIM*2, MIN_DIM),
-            nn.BatchNorm1d(MIN_DIM),
+            nn.Linear(MIN_DIM//2, MIN_DIM//4),
+            nn.BatchNorm1d(MIN_DIM//4),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Dropout(0.3),
-            nn.Linear(MIN_DIM, 1)
+            nn.Linear(MIN_DIM//4, 1)
         )
 
         self.parallel_3 = nn.Sequential(
-            nn.Linear(MIN_DIM, 1)
+            nn.Linear(MIN_DIM//4, 1)
         )
 
         self.final = nn.Sequential(
@@ -394,7 +396,7 @@ def generator_train_step(batch_size, discriminator, generator, g_optimizer, crit
     
     g_discriminator_loss = criterion(validity, Variable(torch.ones(batch_size).to(torch.float)).to(device).float())
     
-    g_loss =  g_discriminator_loss + g_repeated_loss + untranslatable_loss
+    g_loss =  (g_discriminator_loss + g_discriminator_loss * untranslatable_loss)/2 + g_discriminator_loss * g_repeated_loss
     
     g_loss.backward()
     g_optimizer.step()
@@ -406,7 +408,7 @@ def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, 
     # train with real smiles
 
     real_validity = discriminator(real_smiles, labels)
-    real_validity = torch.where(real_validity > 0.9, torch.tensor(0.9), real_validity)
+    # real_validity = torch.where(real_validity > 0.9, torch.tensor(0.9), real_validity)
 
     real_loss = criterion(real_validity, Variable(torch.ones(batch_size)).to(device))
 
@@ -496,11 +498,11 @@ def train(params, generator, discriminator, criterion, batch_size=None, num_epoc
         train_tracking = {}
 
     d_optimizer = torch.optim.Adam(discriminator.parameters(), lr=LR)
-    g_optimizer = torch.optim.Adam(generator.parameters(), lr=GLRM*LR)
+    g_optimizer = torch.optim.SGD(generator.parameters(), lr=GLRM*LR)
     
     generator, g_optimizer, discriminator, d_optimizer, start_epoch = load_states(generator, g_optimizer, discriminator, d_optimizer, params)        
 
-    for epoch in range(start_epoch, num_epochs):
+    for epoch in range(start_epoch, num_epochs+1):
         this_epock_tracking = {"D Loss":[], "D Real Loss":[], "D Fake Loss":[], "G Loss":[],
                                  "G Repeatition Loss":[], "G Untranslatable Loss":[]}
         
@@ -546,11 +548,7 @@ d_real_loss: {:.2f}, d_fake_loss: {:.2f}  |  g_disc_loss: {:.2f}, g_untranslatab
                                 "G Untranslatable Loss":np.mean(this_epock_tracking["G Untranslatable Loss"])}
         
         if epoch % display_step == 0:
-            # print('Saving smiles >> Epoch: [{}] --- d_loss: {:.2f}  |  g_loss: {:.2f}\n\
-            #       d_real_loss: {:.2f}, d_fake_loss: {:.2f} | loss_multiplier: {:.2f}, g_rep_loss: {:.2f}, g_val_loss: {:.2f}, g_disc_loss: {:.2f}'.format(
-            #                         epoch, d_loss, g_loss, d_real_loss, d_fake_loss, loss_multiplier, g_rep_loss, g_val_loss, g_disc_loss))
-
-            z = Variable(torch.randn(32, NOISE_DIM)).to(device)
+            z = Variable(torch.normal(mean=0, std=1, size=(32, NOISE_DIM))).to(device)
             sample_classes = Variable(torch.randint(0, num_classes, size=(32,)).to(torch.long)).to(device)
             sample_smiles = generator(z, sample_classes)
             
@@ -602,22 +600,21 @@ def load_states(generator, g_optimizer, discriminator, d_optimizer, this_params)
     return generator, g_optimizer, discriminator, d_optimizer, start_epoch
 
 if __name__ == "__main__":
-    NOISE_DIM = 256
+    NOISE_DIM = 128
 
     transform = transforms.Compose([
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.5], std=[0.5])
             ])  
     dataset = DrugLikeMolecules(transform=transform,
-                                file_path='chebi_selected_smiles_1of8_subset.txt'
+                                file_path='chebi_selected_smiles2.txt'
                                 )
 
     params = {"learning_rate": [0.0001],
-              "generator_lr_multiplier": [5, 3, 1],
-              "batch_per_epoca": [256,
-                                  128],
-              "min_dim":[256,
-                         128]}
+              "generator_lr_multiplier": [10, 5, 2],
+              "batch_per_epoca": [512,
+                                  256],
+              "min_dim":[64]}
     
     params_combinations = list(product(*params.values()))
 

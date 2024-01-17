@@ -24,22 +24,6 @@ from rdkit import Chem
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 # device = "cpu"
-
-# '''Reference: https://hassanaskary.medium.com/intuitive-explanation-of-straight-through-estimators-with-pytorch-implementation-71d99d25d9d0#:~:text=A%20straight%2Dthrough%20estimator%20is,function%20was%20an%20identity%20function.'''
-
-# class STEFunction(autograd.Function):
-#     @staticmethod
-#     def forward(ctx, input):
-#         return (input > 0).float()
-#     @staticmethod
-#     def backward(ctx, grad_output):
-#         return F.hardtanh(grad_output)
-# class StraightThroughEstimator(nn.Module):
-#     def __init__(self):
-#         super(StraightThroughEstimator, self).__init__()
-#     def forward(self, x):
-#         x = STEFunction.apply(x)
-#         return x
     
 class smiles_coder:
     def __init__(self):
@@ -47,6 +31,9 @@ class smiles_coder:
         self.char_to_int = None
         self.int_to_char = None
         self.fitted = False
+
+        if os.path.exists('smiles_vocab.npz'):
+            self.load('smiles_vocab.npz')
 
     def fit(self, smiles_data, max_length = 150):
         for i in tqdm(range(len(smiles_data))):
@@ -175,18 +162,38 @@ def get_hot_smiles(file_name):
             molecules.append(s[0])
             classes.append(c)
 
-    unique_elements = list(set(classes))
-
     classes_hot_array = np.array([])
 
-    for classe in classes:
-        classes_hot_array = np.append(classes_hot_array, unique_elements.index(classe))
+    if not os.path.exists('classes_vocab.json'):
+        unique_elements = list(set(classes))
+
+        for classe in classes:
+            classes_hot_array = np.append(classes_hot_array, unique_elements.index(classe))
+
+        classes_vocab = {}
+        for i, elem in enumerate(unique_elements):
+            classes_vocab[elem] = i
+
+        with open('classes_vocab.json', 'w') as f:
+            json.dump(classes_vocab, f)
+            f.close()
+    else:
+        with open('classes_vocab.json', 'r') as f:
+            classes_vocab = json.load(f)
+            f.close()
+
+        for classe in classes:
+            classes_hot_array = np.append(classes_hot_array, classes_vocab[classe])
+
+        unique_elements = list(classes_vocab.keys())
 
     processed_molecules, smiles_max_length = preprocessing_data(molecules, replace_dict)
 
     ######## TURNING TO ONE HOT ########
     coder = smiles_coder()
-    coder.fit(processed_molecules, smiles_max_length)
+    if not os.path.exists('smiles_vocab.npz'):
+        coder.fit(processed_molecules, smiles_max_length)
+        coder.save('smiles_vocab.npz')
     smiles_hot_arrays = coder.transform(processed_molecules)
 
     return smiles_hot_arrays, molecules, classes_hot_array, coder, unique_elements
@@ -223,34 +230,82 @@ class Generator(nn.Module):
 
         self.label_emb = nn.Embedding(self.unique_classes, self.unique_classes)
 
-        self.lstm = nn.LSTM(input_size=self.noise_dim + self.unique_classes,
-                            hidden_size=MIN_DIM*2,
-                            num_layers=2,
-                            batch_first=True)
-
-        self.linear_layers = nn.Sequential(
-            nn.BatchNorm1d(MIN_DIM*2),
+        self.smile_input = nn.Sequential(
+            nn.Linear(self.noise_dim + self.unique_classes, MIN_DIM//4),
+            nn.BatchNorm1d(MIN_DIM//4),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(MIN_DIM*2, smiles_nodes),
+        )
+
+        self.parallel1_ = nn.Sequential(
+            nn.Linear(MIN_DIM//4, MIN_DIM//2),
+            nn.BatchNorm1d(MIN_DIM//2),
+            nn.LeakyReLU(0.2, inplace=True),
+        )
+
+        self.parallel_1 = nn.Sequential(
+            nn.Linear(MIN_DIM//4, MIN_DIM//2),
+            nn.BatchNorm1d(MIN_DIM//2),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Linear(MIN_DIM//2, MIN_DIM),
+            nn.BatchNorm1d(MIN_DIM),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Linear(MIN_DIM, self.smiles_nodes),
+            nn.BatchNorm1d(smiles_nodes),
+            nn.LeakyReLU(0.2, inplace=True),
+        )
+
+        self.parallel2_ = nn.Sequential(
+            nn.Linear(MIN_DIM//2, MIN_DIM),
+            nn.BatchNorm1d(MIN_DIM),
+            nn.LeakyReLU(0.2, inplace=True),
+        )
+
+        self.parallel_2 = nn.Sequential(
+            nn.Linear(MIN_DIM//2, MIN_DIM),
+            nn.BatchNorm1d(MIN_DIM),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Linear(MIN_DIM, self.smiles_nodes),
+            nn.BatchNorm1d(smiles_nodes),
+            nn.LeakyReLU(0.2, inplace=True),
+        )
+
+        self.parallel_3 = nn.Sequential(
+            nn.Linear(MIN_DIM, self.smiles_nodes),
+            nn.BatchNorm1d(smiles_nodes),
+            nn.LeakyReLU(0.2, inplace=True),
+        )
+
+        self.final = nn.Sequential(
+            nn.Linear(3*self.smiles_nodes, self.smiles_nodes),
             nn.Tanh()
         )
 
+
     def forward(self, z, c):
-        z = z.view(z.size(0), 1, self.noise_dim)  # Add time dimension
+        z = z.view(z.size(0), 1, self.noise_dim)
 
         assert torch.all(c >= 0)
         assert torch.all(c < self.label_emb.num_embeddings)
 
         c = self.label_emb(c.to(torch.int).to(z.device))
 
-        lstm_out, _ = self.lstm(torch.cat([z, c.unsqueeze(1).expand(-1, z.size(1), -1)], dim=-1))
+        x = torch.cat([z.squeeze(1), c], 1)
 
-        # Extract the last time step output from the LSTM
-        lstm_out = lstm_out[:, -1, :]
+        x0 = self.smile_input(x.to(torch.float).to(device))
 
-        linear_out = self.linear_layers(lstm_out)
+        x_1 = self.parallel_1(x0)
+        x1_ = self.parallel1_(x0)
 
-        return linear_out.view(-1, self.smiles_nodes)
+        x_2 = self.parallel_2(x1_)
+        x2_ = self.parallel2_(x1_)
+
+        x_3 = self.parallel_3(x2_)
+
+        x_concatenated = torch.cat([x_1, x_2, x_3], 1)
+        
+        out = self.final(x_concatenated)
+    
+        return out.squeeze()
 
 class Discriminator(nn.Module):
     def __init__(self, smiles_nodes, smiles_shape, classes_shape, unique_classes, MIN_DIM):
@@ -268,14 +323,14 @@ class Discriminator(nn.Module):
             nn.Linear(self.smiles_nodes + self.unique_classes, MIN_DIM),
             nn.BatchNorm1d(MIN_DIM),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.3)
+            nn.Dropout(0.5)
         )
 
         self.parallel1_ = nn.Sequential(
             nn.Linear(MIN_DIM, MIN_DIM//2),
             nn.BatchNorm1d(MIN_DIM//2),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.3),
+            nn.Dropout(0.5),
 
         )
 
@@ -283,11 +338,11 @@ class Discriminator(nn.Module):
             nn.Linear(MIN_DIM, MIN_DIM//2),
             nn.BatchNorm1d(MIN_DIM//2),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.3),
+            nn.Dropout(0.5),
             nn.Linear(MIN_DIM//2, MIN_DIM//4),
             nn.BatchNorm1d(MIN_DIM//4),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.3),
+            nn.Dropout(0.5),
             nn.Linear(MIN_DIM//4, 1)
         )
 
@@ -295,14 +350,14 @@ class Discriminator(nn.Module):
             nn.Linear(MIN_DIM//2, MIN_DIM//4),
             nn.BatchNorm1d(MIN_DIM//4),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.3)
+            nn.Dropout(0.5)
         )
 
         self.parallel_2 = nn.Sequential(
             nn.Linear(MIN_DIM//2, MIN_DIM//4),
             nn.BatchNorm1d(MIN_DIM//4),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.3),
+            nn.Dropout(0.5),
             nn.Linear(MIN_DIM//4, 1)
         )
 
@@ -339,32 +394,6 @@ class Discriminator(nn.Module):
         out = self.sigmoid(final_x)
     
         return out.squeeze()
-    
-def backup_and_check_percentage(data_list):
-    file_path = 'smiles_backup.txt'
-    # Load existing data from the file if it exists
-    existing_data = set()
-    if os.path.exists(file_path):
-        with open(file_path, 'r') as file:
-            for line in file:
-                existing_data.add(line.strip())
-
-    # Remove duplicates from the current data list
-    unique_data_list = list(set(data_list))
-
-    # Identify new elements that are not already in the file
-    new_elements = set(unique_data_list).difference(existing_data)
-
-    # Backup the new elements to the file
-    with open(file_path, 'a') as file:
-        for element in new_elements:
-            file.write(str(element) + '\n')
-
-    # Calculate the percentage of elements in the current list that are already in the file
-    common_elements = set(unique_data_list).intersection(existing_data)
-    percentage_common = (len(common_elements) / len(unique_data_list)) * 100
-
-    return percentage_common
 
 def check_repeated(data_list):
     unique_list = set(data_list)    
@@ -400,7 +429,7 @@ def generator_train_step(batch_size, discriminator, generator, g_optimizer, crit
     
     g_loss.backward()
     g_optimizer.step()
-    return g_loss.data.item(), g_repeated_loss, g_discriminator_loss, untranslatable_loss
+    return g_loss.data.item(), g_repeated_loss, g_discriminator_loss.data.item(), untranslatable_loss
 
 def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, criterion, real_smiles, labels, num_classes):
     d_optimizer.zero_grad()
@@ -498,13 +527,13 @@ def train(params, generator, discriminator, criterion, batch_size=None, num_epoc
         train_tracking = {}
 
     d_optimizer = torch.optim.Adam(discriminator.parameters(), lr=LR)
-    g_optimizer = torch.optim.SGD(generator.parameters(), lr=GLRM*LR)
+    g_optimizer = torch.optim.Adam(generator.parameters(), lr=GLRM*LR)
     
     generator, g_optimizer, discriminator, d_optimizer, start_epoch = load_states(generator, g_optimizer, discriminator, d_optimizer, params)        
 
     for epoch in range(start_epoch, num_epochs+1):
         this_epock_tracking = {"D Loss":[], "D Real Loss":[], "D Fake Loss":[], "G Loss":[],
-                                 "G Repeatition Loss":[], "G Untranslatable Loss":[]}
+                                 "G Repeatition Loss":[], "G Untranslatable Loss":[], "G Disc Loss":[]}
         
         for i, (smiles, labels) in enumerate(data_loader):
 
@@ -534,6 +563,7 @@ def train(params, generator, discriminator, criterion, batch_size=None, num_epoc
             this_epock_tracking["G Loss"].append(g_loss)
             this_epock_tracking["G Untranslatable Loss"].append(g_untranslatable_loss)
             this_epock_tracking["G Repeatition Loss"].append(g_rep_loss)
+            this_epock_tracking["G Disc Loss"].append(g_disc_loss)
             print('Training model >> Epoch: [{}/{}] -- Batch: [{}]\nd_loss: {:.2f}                          |  g_loss: {:.2f}\n\
 d_real_loss: {:.2f}, d_fake_loss: {:.2f}  |  g_disc_loss: {:.2f}, g_untranslatable_loss: {:.2f}, g_rep_loss: {:.2f}'.format(
                         epoch, num_epochs, i, d_loss, g_loss, d_real_loss, d_fake_loss, g_disc_loss, g_untranslatable_loss, g_rep_loss))
@@ -545,7 +575,9 @@ d_real_loss: {:.2f}, d_fake_loss: {:.2f}  |  g_disc_loss: {:.2f}, g_untranslatab
                                 "D Fake Loss":np.mean(this_epock_tracking["D Fake Loss"]),
                                 "G Loss":np.mean(this_epock_tracking["G Loss"]),
                                 "G Repeatition Loss":np.mean(this_epock_tracking["G Repeatition Loss"]),
-                                "G Untranslatable Loss":np.mean(this_epock_tracking["G Untranslatable Loss"])}
+                                "G Untranslatable Loss":np.mean(this_epock_tracking["G Untranslatable Loss"]),
+                                "G Disc Loss":np.mean(this_epock_tracking["G Disc Loss"])
+                                }
         
         if epoch % display_step == 0:
             z = Variable(torch.normal(mean=0, std=1, size=(32, NOISE_DIM))).to(device)
@@ -600,21 +632,20 @@ def load_states(generator, g_optimizer, discriminator, d_optimizer, this_params)
     return generator, g_optimizer, discriminator, d_optimizer, start_epoch
 
 if __name__ == "__main__":
-    NOISE_DIM = 128
+    NOISE_DIM = 100
 
     transform = transforms.Compose([
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.5], std=[0.5])
             ])  
     dataset = DrugLikeMolecules(transform=transform,
-                                file_path='chebi_selected_smiles2.txt'
+                                file_path='chebi_selected_smiles.txt'
                                 )
 
     params = {"learning_rate": [0.0001],
-              "generator_lr_multiplier": [10, 5, 2],
-              "batch_per_epoca": [512,
-                                  256],
-              "min_dim":[64]}
+              "generator_lr_multiplier": [10, 5],
+              "batch_per_epoca": [256],
+              "min_dim":[128]}
     
     params_combinations = list(product(*params.values()))
 
@@ -635,4 +666,4 @@ if __name__ == "__main__":
 
 
         data_loader = torch.utils.data.DataLoader(dataset, BPE, shuffle=True)
-        train(this_params, generator, discriminator, criterion, batch_size=BPE, num_epochs=400, num_classes=dataset.unique_classes)    
+        train(this_params, generator, discriminator, criterion, batch_size=BPE, num_epochs=4000, num_classes=dataset.unique_classes)    

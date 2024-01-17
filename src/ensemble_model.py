@@ -6,25 +6,23 @@ import pandas as pd
 import numpy as np
 import math
 import json
+
 import torch
 import torch.nn as nn
-from torchvision import transforms
 from torch.utils.data import Dataset, DataLoader
 from torch.autograd import Variable
-from torchvision.utils import make_grid
-import torch.nn.functional as F
-import torch.autograd as autograd
 
-import matplotlib.pyplot as plt
 from tqdm import tqdm
 from itertools import product
 
 from visualize_statistics import plot
 from rdkit import Chem
 
+
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 # device = "cpu"
     
+
 class smiles_coder:
     def __init__(self):
         self.char_set = set([' '])
@@ -37,7 +35,7 @@ class smiles_coder:
 
     def fit(self, smiles_data, max_length = 150):
         for i in tqdm(range(len(smiles_data))):
-            smiles_data[i] = smiles_data[i].ljust(max_length)
+            smiles_data[i] = smiles_data[i] + [" "] * max(0, max_length - len(smiles_data[i]))
             self.char_set = self.char_set.union(set(smiles_data[i]))
         self.max_length = max_length
         self.n_class = len(self.char_set)
@@ -50,7 +48,7 @@ class smiles_coder:
             raise ValueError('smiles coder is not fitted')
         m = []
         for i in tqdm(range(len(smiles_data))):
-            smiles_data[i] = smiles_data[i].ljust(self.max_length)
+            smiles_data[i] = smiles_data[i] + [" "] * max(0, self.max_length - len(smiles_data[i]))
             chars = smiles_data[i]
             l = np.zeros((self.max_length, self.n_class))
             for t, char in enumerate(chars):
@@ -62,42 +60,12 @@ class smiles_coder:
             m.append(l)
         return np.array(m)
 
-    def label(self, smiles_data):
-        if not self.fitted:
-            raise ValueError('smiles coder is not fitted')
-        m = []
-        for i in tqdm(range(len(smiles_data))):
-            smiles_data[i] = smiles_data[i].ljust(self.max_length)
-            chars = smiles_data[i]
-            l = np.zeros((self.max_length, 1))
-            for t, char in enumerate(chars):
-                if t >= self.max_length:
-                    break
-                else:
-                    if char in self.char_set:
-                        l[t, 0] = self.char_to_int[char]
-            m.append(l)
-        return np.array(m)
-
     def inverse_transform(self, m):
         if not self.fitted:
             raise ValueError('smiles coder is not fitted')
         smiles_out = []
         for l in m:
             ll = np.argmax(l, axis=1)
-            string = ''
-            for t in ll:
-                if self.int_to_char[t] == ' ':
-                    continue
-                string += self.int_to_char[t]
-            smiles_out.append(string)
-        return np.array(smiles_out)
-
-    def inverse_label(self, l):
-        if not self.fitted:
-            raise ValueError('smiles coder is not fitted')
-        smiles_out = []
-        for ll in l:
             string = ''
             for t in ll:
                 if self.int_to_char[t] == ' ':
@@ -125,24 +93,33 @@ class smiles_coder:
         self.n_class = len(self.char_set)
         self.fitted = True
 
-replace_dict = {'Ag':'D', 'Al':'E', 'Ar':'G', 'As':'J', 'Au':'Q', 'Ba':'X', 'Be':'Y',
-                'Br':'f', 'Ca':'h', 'Cd':'j', 'Ce':'k', 'Cl':'m', 'Cn':'p', 'Co':'q',
-                'Cr':'v', 'Cu':'w', 'Fe':'x', 'Hg':'y', 'Ir':'z', 'La':'!', 'Mg':'$',
-                'Mn':'¬', 'Mo':'&', 'Na':'_', 'Ni':'£', 'Pb':'¢', 'Pt':'?', 'Ra':'ª',
-                'Ru':'º', 'Sb':';', 'Sc':':', 'Se':'>', 'Si':'<', 'Sn':'§', 'Sr':'~',
-                'Te':'^', 'Tl':'|', 'Zn':'{', '@@':'}'}
+def smi_tokenizer(smi: str, reverse=False) -> list:
+    """
+    Tokenize a SMILES molecule
+    """
+    pattern = r"(\[[^\]]+]|A(?:c|l|m|g|r|s|t|u)?|B(?:a|k|i|h|e|r)?|C(?:a|d|e|f|l|m|n|s|o|r|u)?|D(?:b|s|y)?|E(?:s|r|u)?|F(?:m|l|r|e)?|G(?:d|a|e)?|H(?:f|s|e|o|g)?|I(?:n|r)?|K(?:r)?|L(?:a|r|i|v|u)?|M(?:g|n|o|t|c|d)?|N(?:a|b|d|e|p|h|i|o)?|O(?:g|s)?|P(?:a|b|t|u|o|r|m)?|R(?:a|b|n|e|f|h|g|u)?|S(?:b|c|e|g|i|m|n|r)?|T(?:a|b|c|e|h|i|l|m|s)?|W|U|V|Xe|Y(?:b)?|Z(?:n|r)?|b|c|n|o|s|\(|\)|\.|=|#|-|\+|\\\\|\\|\/|:|~|@|\?|>|<|\*|\$|\%[0-9]{2}|[0-9])"
+    regex = re.compile(pattern)
+    # tokens = ['<sos>'] + [token for token in regex.findall(smi)] + ['<eos>']
+    tokens = [token for token in regex.findall(smi)]
+    # assert smi == ''.join(tokens[1:-1])
+    assert smi == "".join(tokens[:])
+    # try:
+    #     assert smi == "".join(tokens[:])
+    # except:
+    #     print(smi)
+    #     print("".join(tokens[:]))
+    if reverse:
+        return tokens[::-1]
+    return tokens
 
-inverse_dict = {v: k for k, v in replace_dict.items()}
-
-def preprocessing_data(molecules, replacement, saving=False):
+def preprocessing_data(molecules, saving=False):
+    
+    tokenized_molecules = [smi_tokenizer(mol) for mol in molecules]
 
     if not saving:
-        molecules = pd.Series(molecules)
+        molecules = pd.Series(tokenized_molecules)
     else:
-        molecules = pd.Series([mol for mol in molecules])
-
-    for pattern, repl in replacement.items():
-        molecules = molecules.str.replace(pattern, repl, regex=False)
+        molecules = pd.Series([mol for mol in tokenized_molecules])
 
     max_length = len(max(molecules, key=len))
 
@@ -187,7 +164,7 @@ def get_hot_smiles(file_name):
 
         unique_elements = list(classes_vocab.keys())
 
-    processed_molecules, smiles_max_length = preprocessing_data(molecules, replace_dict)
+    processed_molecules, smiles_max_length = preprocessing_data(molecules)
 
     ######## TURNING TO ONE HOT ########
     coder = smiles_coder()
@@ -394,7 +371,7 @@ class Discriminator(nn.Module):
         out = self.sigmoid(final_x)
     
         return out.squeeze()
-
+    
 def check_repeated(data_list):
     unique_list = set(data_list)    
 
@@ -425,7 +402,7 @@ def generator_train_step(batch_size, discriminator, generator, g_optimizer, crit
     
     g_discriminator_loss = criterion(validity, Variable(torch.ones(batch_size).to(torch.float)).to(device).float())
     
-    g_loss =  (g_discriminator_loss + g_discriminator_loss * untranslatable_loss)/2 + g_discriminator_loss * g_repeated_loss
+    g_loss =  g_discriminator_loss*(1 + 2*untranslatable_loss + g_repeated_loss/2)/3.5
     
     g_loss.backward()
     g_optimizer.step()
@@ -462,8 +439,7 @@ def translate_smiles(sample_smiles, dataset):
     for sml in sample_smiles:
         this_smile = np.reshape(sml.detach().cpu().numpy(), (1, dataset.smiles.shape[1], dataset.smiles.shape[2]))
         all_gen_smiles.append(dataset.coder.inverse_transform(this_smile)[0])
-    processed_molecules = preprocessing_data(all_gen_smiles, inverse_dict)
-    return [gen_smiles for gen_smiles in processed_molecules[0]]
+    return all_gen_smiles
 
 def save_state(generator, discriminator, g_optimizer, d_optimizer,
                epoch, sample_smiles, sample_classes, dataset, params, train_tracking):
@@ -474,13 +450,14 @@ def save_state(generator, discriminator, g_optimizer, d_optimizer,
     folder_name = f"./generated_files/{MIN_DIM}lr{LR}g{GLRM}_bpe{BPE}"
     if not os.path.exists(folder_name):
         os.mkdir(folder_name)
-    for i in ("smiles", "classes", "models"):
+    for i in ("smiles", "classes"):
         if not os.path.exists(f"{folder_name}/{i}"):
             os.mkdir(f"{folder_name}/{i}")
 
     # Translating smiles
     processed_molecules = translate_smiles(sample_smiles, dataset)
-
+    processed_df = pd.DataFrame({"SMILES":processed_molecules})
+    
     # Translating classes
     all_gen_classes = []
     for cls in sample_classes:
@@ -634,23 +611,18 @@ def load_states(generator, g_optimizer, discriminator, d_optimizer, this_params)
 if __name__ == "__main__":
     NOISE_DIM = 100
 
-    transform = transforms.Compose([
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.5], std=[0.5])
-            ])  
-    dataset = DrugLikeMolecules(transform=transform,
-                                file_path='chebi_selected_smiles.txt'
+    dataset = DrugLikeMolecules(file_path='chebi_selected_smiles.txt'
                                 )
 
     params = {"learning_rate": [0.0001],
               "generator_lr_multiplier": [10, 5],
-              "batch_per_epoca": [256],
-              "min_dim":[128]}
+              "batch_per_epoca": [128],
+              "min_dim":[64]}
     
     params_combinations = list(product(*params.values()))
 
     generator_loader = torch.utils.data.DataLoader(dataset, batch_size=32, shuffle=True)
-
+    
     for pc in params_combinations:    
         this_params = dict(zip(params.keys(), pc))
         print(this_params)
@@ -664,6 +636,5 @@ if __name__ == "__main__":
         generator = Generator(dataset.smiles_nodes, dataset.smiles.shape, dataset.classes.shape, dataset.unique_classes, NOISE_DIM, MIN_DIM).to(device)
         discriminator = Discriminator(dataset.smiles_nodes, dataset.smiles.shape, dataset.classes.shape, dataset.unique_classes, MIN_DIM).to(device)
 
-
         data_loader = torch.utils.data.DataLoader(dataset, BPE, shuffle=True)
-        train(this_params, generator, discriminator, criterion, batch_size=BPE, num_epochs=4000, num_classes=dataset.unique_classes)    
+        train(this_params, generator, discriminator, criterion, batch_size=BPE, num_epochs=10000, num_classes=dataset.unique_classes)    

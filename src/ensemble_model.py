@@ -230,11 +230,6 @@ class Generator(nn.Module):
             nn.BatchNorm1d(MIN_DIM*2),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Flatten(),
-        )
-
-        self.rnn2 = nn.LSTM(MIN_DIM*2, MIN_DIM, bidirectional=True, batch_first=True)
-
-        self.out = nn.Sequential(
             spectral_norm(nn.Linear(MIN_DIM*2, self.smiles_nodes)),
             nn.Tanh()
         )
@@ -256,11 +251,7 @@ class Generator(nn.Module):
 
         y = torch.cat([lstm1_out.squeeze(1), c, z], 1)
         
-        decoder_out = self.decoder(y.unsqueeze(-1))
-
-        lstm2_out, _ = self.rnn2(decoder_out.unsqueeze(1))
-    
-        out = self.out(lstm2_out)
+        out = self.decoder(y.unsqueeze(-1))
         
         return out.squeeze()
 
@@ -320,10 +311,6 @@ class Discriminator(nn.Module):
             spectral_norm(nn.Linear(MIN_DIM//4, 1))
         )
 
-        self.final = nn.Sequential(
-            spectral_norm(nn.Linear(3, 1))
-        )
-
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x, c):
@@ -344,9 +331,7 @@ class Discriminator(nn.Module):
 
         x_concatenated = torch.cat([x_1, x_2, x_3], 1)
         
-        final_x = self.final(x_concatenated)
-
-        out = self.sigmoid(final_x)
+        out = self.sigmoid(x_concatenated)
     
         return out.squeeze()
     
@@ -355,31 +340,31 @@ def check_repeated(data_list):
 
     return 1-len(unique_list)/len(data_list)
 
-# # Generator Loss Function
-# def generator_loss(validity, discriminators_guesses, criterion, batch_size):
-#     total_loss = 0.0
+# Generator Loss Function
+def generator_loss(validity, criterion):
+    total_loss = 0.0
 
-#     for k, guess in enumerate(discriminators_guesses):
-#         modulating_factor = (1 - guess)**2
-#         loss = modulating_factor * criterion(validity, Variable(torch.ones(batch_size).to(torch.float)).to(device).float())
-#         total_loss += loss
+    for k, guess in enumerate(validity):
+        modulating_factor = (1 - guess)**2
+        loss = modulating_factor * criterion(guess, torch.ones_like(guess).to(device))
+        total_loss += loss
 
-#     return total_loss / len(discriminators_guesses)
+    return total_loss / len(validity)
 
-# # Discriminator Loss Function
-# def discriminator_loss(real_validity, fake_validity, r_discriminators_guesses, f_discriminator_guesses, criterion, batch_size):
-#     total_loss = 0.0
+# Discriminator Loss Function
+def discriminator_loss(real_validity, fake_validity, criterion):
+    total_loss = 0.0
 
-#     for k, (r_guess, f_guess) in enumerate(zip(r_discriminators_guesses, f_discriminator_guesses)):
-#         modulating_factor_real = (1 - r_guess)**2
-#         modulating_factor_fake = (1 - f_guess)**2
+    for k, (r_guess, f_guess) in enumerate(zip(real_validity, fake_validity)):
+        modulating_factor_real = (1 - r_guess)**2
+        modulating_factor_fake = (1 - f_guess)**2
 
-#         loss_real = modulating_factor_real * criterion(real_validity, Variable(torch.ones(batch_size)).to(device))
-#         loss_fake = modulating_factor_fake * criterion(fake_validity, Variable(torch.zeros(batch_size)).to(device))
+        loss_real = modulating_factor_real * criterion(r_guess, torch.ones_like(r_guess).to(device))
+        loss_fake = modulating_factor_fake * criterion(f_guess, torch.zeros_like(f_guess).to(device))
         
-#         total_loss += loss_real + loss_fake
+        total_loss += loss_real + loss_fake
 
-#     return total_loss / len(r_discriminators_guesses)
+    return total_loss / len(real_validity)
 
 def generator_train_step(batch_size, discriminator, generator, g_optimizer, criterion, labels, num_classes, real_smiles):
     g_optimizer.zero_grad()
@@ -394,50 +379,37 @@ def generator_train_step(batch_size, discriminator, generator, g_optimizer, crit
     translated_smiles = translate_smiles(fake_smiles, dataset)
 
     g_smiles_validity_loss = np.mean([float(1) if Chem.MolFromSmiles(this) == None else float(0) for this in translated_smiles])
-    untranslatable_loss = math.log(1 + g_smiles_validity_loss) / math.log(2)
+    untranslatable_loss = torch.tensor(math.log(1 + g_smiles_validity_loss) / math.log(2), requires_grad=True)
 
-    # duplicated_loss = backup_and_check_percentage(translated_smiles)
-    g_repeated_loss = math.log(1 + check_repeated(translated_smiles)) / math.log(2)
+    g_repeated_loss = torch.tensor(math.log(1 + check_repeated(translated_smiles)) / math.log(2), requires_grad=True)
 
     os.system('clear')
-
-    # g_smiles_validity_loss = criterion(Variable(smiles_validity).to(torch.float).to(device).float(),
-    #                                     Variable(torch.ones(batch_size).to(torch.float)).to(device).float())
     
-    g_discriminator_loss = criterion(validity, Variable(torch.ones(batch_size).to(torch.float)).to(device).float())
+    g_discriminator_loss = torch.sum(generator_loss(validity, criterion))
     
-    g_loss =  g_discriminator_loss*(1 + untranslatable_loss)/2 + g_repeated_loss/2
+    g_loss =  g_discriminator_loss + untranslatable_loss + g_repeated_loss
     
     g_loss.backward()
     g_optimizer.step()
-    return g_loss.data.item(), g_repeated_loss, g_discriminator_loss.data.item(), untranslatable_loss
+    return g_loss.data.item(), g_repeated_loss.data.item(), g_discriminator_loss.data.item(), untranslatable_loss.data.item()
 
 def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, criterion, real_smiles, labels, num_classes):
     d_optimizer.zero_grad()
 
     # train with real smiles
-
     real_validity = discriminator(real_smiles, labels)
 
-    real_loss = criterion(real_validity, Variable(torch.ones(batch_size)).to(device))
-
+    # train with fake smiles
     z = Variable(torch.normal(mean=0, std=1, size=(batch_size, NOISE_DIM))).to(device)
-    
     fake_labels = Variable(torch.randint(0, num_classes, size=labels.shape).to(torch.int)).to(device)
-
     fake_smiles = generator(z, fake_labels, real_smiles)
-
     fake_validity = discriminator(fake_smiles, fake_labels)
 
-    fake_loss = criterion(fake_validity, Variable(torch.zeros(batch_size)).to(device))
+    d_loss = torch.sum(discriminator_loss(real_validity, fake_validity, criterion))
 
-    # wasserstein_loss = scipy.stats.wasserstein_distance(fake_smiles.detach().cpu().numpy(),
-    #                                                     real_smiles.reshape(batch_size, -1).detach().cpu().numpy())
-
-    d_loss = real_loss + fake_loss
     d_loss.backward()
     d_optimizer.step()
-    return d_loss.data.item(), real_loss.data.item(),  fake_loss.data.item()
+    return d_loss.data.item()
 
 def translate_smiles(sample_smiles, dataset):
     all_gen_smiles = []
@@ -544,7 +516,7 @@ def train(params, generator, discriminator, criterion, batch_size=None, num_epoc
                 batch_size = real_smiles.size(0)
                 
 
-            d_loss, d_real_loss, d_fake_loss = discriminator_train_step(batch_size, discriminator,
+            d_loss = discriminator_train_step(batch_size, discriminator,
                                                 generator, d_optimizer, criterion, real_smiles,
                                                 labels, num_classes)
 
@@ -552,21 +524,17 @@ def train(params, generator, discriminator, criterion, batch_size=None, num_epoc
                                            criterion, labels, num_classes, real_smiles)
             
             this_epock_tracking["D Loss"].append(d_loss)
-            this_epock_tracking["D Real Loss"].append(d_real_loss)
-            this_epock_tracking["D Fake Loss"].append(d_fake_loss)
             this_epock_tracking["G Loss"].append(g_loss)
             this_epock_tracking["G Untranslatable Loss"].append(g_untranslatable_loss)
             this_epock_tracking["G Repeatition Loss"].append(g_rep_loss)
             this_epock_tracking["G Disc Loss"].append(g_disc_loss)
-            print('Training model >> Epoch: [{}/{}] -- Batch: [{}]\nd_loss: {:.2f}                          |  g_loss: {:.2f}\n\
-d_real_loss: {:.2f}, d_fake_loss: {:.2f}  |  g_disc_loss: {:.2f}, g_untranslatable_loss: {:.2f}, g_rep_loss: {:.2f}'.format(
-                        epoch, num_epochs, i, d_loss, g_loss, d_real_loss, d_fake_loss, g_disc_loss, g_untranslatable_loss, g_rep_loss))
+            print('Training model >> Epoch: [{}/{}] -- Batch: [{}]\nd_loss: {:.2f}  |  g_loss: {:.2f}\n\
+              |  g_disc_loss: {:.2f}, g_untranslatable_loss: {:.2f}, g_rep_loss: {:.2f}'.format(
+                        epoch, num_epochs, i, d_loss, g_loss, g_disc_loss, g_untranslatable_loss, g_rep_loss))
 
         generator.eval()
 
         train_tracking[epoch] = {"D Loss":np.mean(this_epock_tracking["D Loss"]),
-                                "D Real Loss":np.mean(this_epock_tracking["D Real Loss"]),
-                                "D Fake Loss":np.mean(this_epock_tracking["D Fake Loss"]),
                                 "G Loss":np.mean(this_epock_tracking["G Loss"]),
                                 "G Repeatition Loss":np.mean(this_epock_tracking["G Repeatition Loss"]),
                                 "G Untranslatable Loss":np.mean(this_epock_tracking["G Untranslatable Loss"]),
@@ -627,7 +595,7 @@ if __name__ == "__main__":
                                 )
 
     params = {"learning_rate": [0.0001],
-              "generator_lr_multiplier": [10, 5, 2],
+              "generator_lr_multiplier": [5, 2],
               "batch_per_epoca": [128, 64],
               "min_dim":[128, 64]}
     

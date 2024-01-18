@@ -574,11 +574,6 @@ def train(this_params, generator, discriminator, criterion, batch_size=None, num
             g_loss, g_rep_loss, g_disc_loss, g_untranslatable_loss  = generator_train_step(batch_size, discriminator, generator, g_optimizer,
                                            criterion, labels, num_classes, real_smiles)
             
-            if g_loss < best_validation_loss and g_loss < 1:
-                best_validation_loss = g_loss
-                current_patience = 0
-            else:
-                current_patience += 1
 
             this_epock_tracking["D Loss"].append(d_loss)
             this_epock_tracking["G Loss"].append(g_loss)
@@ -598,6 +593,12 @@ def train(this_params, generator, discriminator, criterion, batch_size=None, num
                                 "G Untranslatable Loss":np.mean(this_epock_tracking["G Untranslatable Loss"])
                                 }
         
+        if g_loss < best_validation_loss and g_loss < 1:
+            best_validation_loss = g_loss
+            current_patience = 0
+        else:
+            current_patience += 1
+
         if current_patience >= patience:
             force_break = True
 
@@ -617,11 +618,13 @@ if __name__ == "__main__":
     dataset = DrugLikeMolecules(file_path='chebi_selected_smiles.txt'
                                 )
 
-    params = {"learning_rate": [0.0001, 0.00001],
+    params = {
+              "batch_per_epoca": [256, 128, 64],
+              "learning_rate": [0.0001, 0.00001],
               "generator_lr_multiplier": [2, 5],
-              "batch_per_epoca": [64, 128, 256],
               "min_dim":[64, 128, 256],
-              "gen_opt":[torch.optim.SGD, torch.optim.Adam]}
+              "gen_opt":[torch.optim.SGD, torch.optim.Adam]
+            }
     
     params_combinations = list(product(*params.values()))
 

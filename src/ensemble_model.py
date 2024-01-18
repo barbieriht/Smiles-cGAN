@@ -19,6 +19,7 @@ from itertools import product
 from visualize_statistics import plot
 from rdkit import Chem
 import random
+import scipy.stats
 
 SEED = 42
 random.seed(SEED)
@@ -279,21 +280,21 @@ class Discriminator(nn.Module):
             spectral_norm(nn.Conv1d(self.smiles_nodes + self.unique_classes, MIN_DIM, kernel_size=1)),
             nn.BatchNorm1d(MIN_DIM),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.3)
+            nn.Dropout(0.2)
         )
 
         self.parallel1_ = nn.Sequential(
             spectral_norm(nn.Conv1d(MIN_DIM, MIN_DIM//2, kernel_size=1)),
             nn.BatchNorm1d(MIN_DIM//2),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.3),
+            nn.Dropout(0.2),
         )
 
         self.parallel_1 = nn.Sequential(
             spectral_norm(nn.Conv1d(MIN_DIM, MIN_DIM//4, kernel_size=1)),
             nn.BatchNorm1d(MIN_DIM//4),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.3),
+            nn.Dropout(0.2),
             nn.Flatten(),
             spectral_norm(nn.Linear(MIN_DIM//4, 1))
         )
@@ -302,7 +303,7 @@ class Discriminator(nn.Module):
             spectral_norm(nn.Conv1d(MIN_DIM//2, MIN_DIM//4, kernel_size=1)),
             nn.BatchNorm1d(MIN_DIM//4),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.3),
+            nn.Dropout(0.2),
             nn.Flatten()
         )
 
@@ -310,7 +311,7 @@ class Discriminator(nn.Module):
             spectral_norm(nn.Conv1d(MIN_DIM//2, MIN_DIM//4, kernel_size=1)),
             nn.BatchNorm1d(MIN_DIM//4),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.3),
+            nn.Dropout(0.2),
             nn.Flatten(),
             spectral_norm(nn.Linear(MIN_DIM//4, 1))
         )
@@ -354,6 +355,32 @@ def check_repeated(data_list):
 
     return 1-len(unique_list)/len(data_list)
 
+# # Generator Loss Function
+# def generator_loss(validity, discriminators_guesses, criterion, batch_size):
+#     total_loss = 0.0
+
+#     for k, guess in enumerate(discriminators_guesses):
+#         modulating_factor = (1 - guess)**2
+#         loss = modulating_factor * criterion(validity, Variable(torch.ones(batch_size).to(torch.float)).to(device).float())
+#         total_loss += loss
+
+#     return total_loss / len(discriminators_guesses)
+
+# # Discriminator Loss Function
+# def discriminator_loss(real_validity, fake_validity, r_discriminators_guesses, f_discriminator_guesses, criterion, batch_size):
+#     total_loss = 0.0
+
+#     for k, (r_guess, f_guess) in enumerate(zip(r_discriminators_guesses, f_discriminator_guesses)):
+#         modulating_factor_real = (1 - r_guess)**2
+#         modulating_factor_fake = (1 - f_guess)**2
+
+#         loss_real = modulating_factor_real * criterion(real_validity, Variable(torch.ones(batch_size)).to(device))
+#         loss_fake = modulating_factor_fake * criterion(fake_validity, Variable(torch.zeros(batch_size)).to(device))
+        
+#         total_loss += loss_real + loss_fake
+
+#     return total_loss / len(r_discriminators_guesses)
+
 def generator_train_step(batch_size, discriminator, generator, g_optimizer, criterion, labels, num_classes, real_smiles):
     g_optimizer.zero_grad()
     
@@ -379,7 +406,7 @@ def generator_train_step(batch_size, discriminator, generator, g_optimizer, crit
     
     g_discriminator_loss = criterion(validity, Variable(torch.ones(batch_size).to(torch.float)).to(device).float())
     
-    g_loss =  g_discriminator_loss*(1 + 2*untranslatable_loss + g_repeated_loss/2)/3.5
+    g_loss =  g_discriminator_loss*(1 + untranslatable_loss)/2 + g_repeated_loss/2
     
     g_loss.backward()
     g_optimizer.step()
@@ -391,11 +418,9 @@ def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, 
     # train with real smiles
 
     real_validity = discriminator(real_smiles, labels)
-    # real_validity = torch.where(real_validity > 0.9, torch.tensor(0.9), real_validity)
 
     real_loss = criterion(real_validity, Variable(torch.ones(batch_size)).to(device))
 
-    # train with fake smiles
     z = Variable(torch.normal(mean=0, std=1, size=(batch_size, NOISE_DIM))).to(device)
     
     fake_labels = Variable(torch.randint(0, num_classes, size=labels.shape).to(torch.int)).to(device)
@@ -405,6 +430,9 @@ def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, 
     fake_validity = discriminator(fake_smiles, fake_labels)
 
     fake_loss = criterion(fake_validity, Variable(torch.zeros(batch_size)).to(device))
+
+    # wasserstein_loss = scipy.stats.wasserstein_distance(fake_smiles.detach().cpu().numpy(),
+    #                                                     real_smiles.reshape(batch_size, -1).detach().cpu().numpy())
 
     d_loss = real_loss + fake_loss
     d_loss.backward()
@@ -599,8 +627,8 @@ if __name__ == "__main__":
                                 )
 
     params = {"learning_rate": [0.0001],
-              "generator_lr_multiplier": [10, 5],
-              "batch_per_epoca": [256, 128],
+              "generator_lr_multiplier": [10, 5, 2],
+              "batch_per_epoca": [128, 64],
               "min_dim":[128, 64]}
     
     params_combinations = list(product(*params.values()))

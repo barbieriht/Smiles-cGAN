@@ -11,13 +11,19 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from torch.autograd import Variable
+import torch.nn.utils.spectral_norm as spectral_norm
 
 from tqdm import tqdm
 from itertools import product
 
 from visualize_statistics import plot
 from rdkit import Chem
+import random
 
+SEED = 42
+random.seed(SEED)
+torch.manual_seed(SEED)
+torch.backends.cudnn.deterministic = True
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 # device = "cpu"
@@ -207,81 +213,54 @@ class Generator(nn.Module):
 
         self.label_emb = nn.Embedding(self.unique_classes, self.unique_classes)
 
-        self.smile_input = nn.Sequential(
-            nn.Linear(self.noise_dim + self.unique_classes, MIN_DIM//4),
-            nn.BatchNorm1d(MIN_DIM//4),
+        self.encoder = nn.Sequential(
+            spectral_norm(nn.Linear(self.smiles_nodes + self.unique_classes, MIN_DIM)),
+            nn.BatchNorm1d(MIN_DIM),
             nn.LeakyReLU(0.2, inplace=True),
-        )
-
-        self.parallel1_ = nn.Sequential(
-            nn.Linear(MIN_DIM//4, MIN_DIM//2),
+            spectral_norm(nn.Linear(MIN_DIM, MIN_DIM//2)),
             nn.BatchNorm1d(MIN_DIM//2),
             nn.LeakyReLU(0.2, inplace=True),
         )
 
-        self.parallel_1 = nn.Sequential(
-            nn.Linear(MIN_DIM//4, MIN_DIM//2),
-            nn.BatchNorm1d(MIN_DIM//2),
+        self.rnn1 = nn.LSTM(MIN_DIM//2, MIN_DIM, bidirectional=True ,batch_first=True)
+
+        self.decoder = nn.Sequential(
+            spectral_norm(nn.Conv1d(MIN_DIM*2 + self.unique_classes + self.noise_dim, MIN_DIM*2, kernel_size=1)),
+            nn.BatchNorm1d(MIN_DIM*2),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(MIN_DIM//2, MIN_DIM),
-            nn.BatchNorm1d(MIN_DIM),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(MIN_DIM, self.smiles_nodes),
-            nn.BatchNorm1d(smiles_nodes),
-            nn.LeakyReLU(0.2, inplace=True),
+            nn.Flatten(),
         )
 
-        self.parallel2_ = nn.Sequential(
-            nn.Linear(MIN_DIM//2, MIN_DIM),
-            nn.BatchNorm1d(MIN_DIM),
-            nn.LeakyReLU(0.2, inplace=True),
-        )
+        self.rnn2 = nn.LSTM(MIN_DIM*2, MIN_DIM, bidirectional=True, batch_first=True)
 
-        self.parallel_2 = nn.Sequential(
-            nn.Linear(MIN_DIM//2, MIN_DIM),
-            nn.BatchNorm1d(MIN_DIM),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(MIN_DIM, self.smiles_nodes),
-            nn.BatchNorm1d(smiles_nodes),
-            nn.LeakyReLU(0.2, inplace=True),
-        )
-
-        self.parallel_3 = nn.Sequential(
-            nn.Linear(MIN_DIM, self.smiles_nodes),
-            nn.BatchNorm1d(smiles_nodes),
-            nn.LeakyReLU(0.2, inplace=True),
-        )
-
-        self.final = nn.Sequential(
-            nn.Linear(3*self.smiles_nodes, self.smiles_nodes),
+        self.out = nn.Sequential(
+            spectral_norm(nn.Linear(MIN_DIM*2, self.smiles_nodes)),
             nn.Tanh()
         )
 
-
-    def forward(self, z, c):
-        z = z.view(z.size(0), 1, self.noise_dim)
+    def forward(self, z, c, rs):
+        z = z.view(z.size(0), self.noise_dim)
+        rs = rs.view(rs.size(0), self.smiles_nodes)
 
         assert torch.all(c >= 0)
         assert torch.all(c < self.label_emb.num_embeddings)
 
-        c = self.label_emb(c.to(torch.int).to(z.device))
+        c = self.label_emb(c)
 
-        x = torch.cat([z.squeeze(1), c], 1)
+        x = torch.cat([rs.squeeze(1), c], 1)
 
-        x0 = self.smile_input(x.to(torch.float).to(device))
+        encoder_out = self.encoder(x)
 
-        x_1 = self.parallel_1(x0)
-        x1_ = self.parallel1_(x0)
+        lstm1_out, _ = self.rnn1(encoder_out.unsqueeze(1))
 
-        x_2 = self.parallel_2(x1_)
-        x2_ = self.parallel2_(x1_)
-
-        x_3 = self.parallel_3(x2_)
-
-        x_concatenated = torch.cat([x_1, x_2, x_3], 1)
+        y = torch.cat([lstm1_out.squeeze(1), c, z], 1)
         
-        out = self.final(x_concatenated)
+        decoder_out = self.decoder(y.unsqueeze(-1))
+
+        lstm2_out, _ = self.rnn2(decoder_out.unsqueeze(1))
     
+        out = self.out(lstm2_out)
+        
         return out.squeeze()
 
 class Discriminator(nn.Module):
@@ -297,62 +276,60 @@ class Discriminator(nn.Module):
         self.label_emb = nn.Embedding(self.unique_classes, self.unique_classes)
 
         self.smile_input = nn.Sequential(
-            nn.Linear(self.smiles_nodes + self.unique_classes, MIN_DIM),
+            spectral_norm(nn.Conv1d(self.smiles_nodes + self.unique_classes, MIN_DIM, kernel_size=1)),
             nn.BatchNorm1d(MIN_DIM),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.5)
+            nn.Dropout(0.3)
         )
 
         self.parallel1_ = nn.Sequential(
-            nn.Linear(MIN_DIM, MIN_DIM//2),
+            spectral_norm(nn.Conv1d(MIN_DIM, MIN_DIM//2, kernel_size=1)),
             nn.BatchNorm1d(MIN_DIM//2),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.5),
-
+            nn.Dropout(0.3),
         )
 
         self.parallel_1 = nn.Sequential(
-            nn.Linear(MIN_DIM, MIN_DIM//2),
-            nn.BatchNorm1d(MIN_DIM//2),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.5),
-            nn.Linear(MIN_DIM//2, MIN_DIM//4),
+            spectral_norm(nn.Conv1d(MIN_DIM, MIN_DIM//4, kernel_size=1)),
             nn.BatchNorm1d(MIN_DIM//4),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.5),
-            nn.Linear(MIN_DIM//4, 1)
+            nn.Dropout(0.3),
+            nn.Flatten(),
+            spectral_norm(nn.Linear(MIN_DIM//4, 1))
         )
 
         self.parallel2_ = nn.Sequential(
-            nn.Linear(MIN_DIM//2, MIN_DIM//4),
+            spectral_norm(nn.Conv1d(MIN_DIM//2, MIN_DIM//4, kernel_size=1)),
             nn.BatchNorm1d(MIN_DIM//4),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.5)
+            nn.Dropout(0.3),
+            nn.Flatten()
         )
 
         self.parallel_2 = nn.Sequential(
-            nn.Linear(MIN_DIM//2, MIN_DIM//4),
+            spectral_norm(nn.Conv1d(MIN_DIM//2, MIN_DIM//4, kernel_size=1)),
             nn.BatchNorm1d(MIN_DIM//4),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.5),
-            nn.Linear(MIN_DIM//4, 1)
+            nn.Dropout(0.3),
+            nn.Flatten(),
+            spectral_norm(nn.Linear(MIN_DIM//4, 1))
         )
 
         self.parallel_3 = nn.Sequential(
-            nn.Linear(MIN_DIM//4, 1)
+            spectral_norm(nn.Linear(MIN_DIM//4, 1))
         )
 
         self.final = nn.Sequential(
-            nn.Linear(3, 1)
+            spectral_norm(nn.Linear(3, 1))
         )
 
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x, c):
         x = x.view(x.size(0), self.smiles_nodes)
-        c = self.label_emb(c.to(torch.int).to(device))
+        c = self.label_emb(c)
 
-        x = torch.cat([x, c], 1)
+        x = torch.cat([x, c], 1).unsqueeze(-1)
 
         x0 = self.smile_input(x.to(torch.float).to(device))
 
@@ -377,14 +354,14 @@ def check_repeated(data_list):
 
     return 1-len(unique_list)/len(data_list)
 
-def generator_train_step(batch_size, discriminator, generator, g_optimizer, criterion, labels, num_classes):
+def generator_train_step(batch_size, discriminator, generator, g_optimizer, criterion, labels, num_classes, real_smiles):
     g_optimizer.zero_grad()
     
     z = Variable(torch.normal(mean=0, std=1, size=(batch_size, NOISE_DIM))).to(device)
 
-    fake_labels = Variable(torch.randint(0, num_classes, size=labels.shape).to(torch.long)).to(device)
+    fake_labels = Variable(torch.randint(0, num_classes, size=labels.shape).to(torch.int)).to(device)
 
-    fake_smiles = generator(z, fake_labels)
+    fake_smiles = generator(z, fake_labels, real_smiles)
     validity = discriminator(fake_smiles, fake_labels)
 
     translated_smiles = translate_smiles(fake_smiles, dataset)
@@ -421,9 +398,9 @@ def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, 
     # train with fake smiles
     z = Variable(torch.normal(mean=0, std=1, size=(batch_size, NOISE_DIM))).to(device)
     
-    fake_labels = Variable(torch.randint(0, num_classes, size=labels.shape).to(torch.long)).to(device)
+    fake_labels = Variable(torch.randint(0, num_classes, size=labels.shape).to(torch.int)).to(device)
 
-    fake_smiles = generator(z, fake_labels)
+    fake_smiles = generator(z, fake_labels, real_smiles)
 
     fake_validity = discriminator(fake_smiles, fake_labels)
 
@@ -442,7 +419,7 @@ def translate_smiles(sample_smiles, dataset):
     return all_gen_smiles
 
 def save_state(generator, discriminator, g_optimizer, d_optimizer,
-               epoch, sample_smiles, sample_classes, dataset, params, train_tracking):
+               epoch, dataset, train_tracking, save_model_in):
 
     if not os.path.exists('generated_files'):
         os.mkdir('generated_files')
@@ -450,38 +427,49 @@ def save_state(generator, discriminator, g_optimizer, d_optimizer,
     folder_name = f"./generated_files/{MIN_DIM}lr{LR}g{GLRM}_bpe{BPE}"
     if not os.path.exists(folder_name):
         os.mkdir(folder_name)
-    for i in ("smiles", "classes"):
-        if not os.path.exists(f"{folder_name}/{i}"):
-            os.mkdir(f"{folder_name}/{i}")
 
-    # Translating smiles
-    processed_molecules = translate_smiles(sample_smiles, dataset)
-    processed_df = pd.DataFrame({"SMILES":processed_molecules})
-    
-    # Translating classes
-    all_gen_classes = []
-    for cls in sample_classes:
-        all_gen_classes.append(dataset.classes_code[cls])
+    if epoch % save_model_in == 0:    
 
-    # Saving Generator State
-    generator_state = {'state_dict': generator.state_dict(), 'optimizer': g_optimizer.state_dict()}
-    torch.save(generator_state, f"{folder_name}/generator.pt")
+        for batch in generator_loader:
+            sample_smiles, sample_classes = batch
+            break
 
-    # Saving Discriminator State
-    discriminator_state = {'state_dict': discriminator.state_dict(), 'optimizer': d_optimizer.state_dict()}
-    torch.save(discriminator_state, f"{folder_name}/discriminator.pt")
+        sample_smiles = Variable(sample_smiles.to(torch.float)).to(device).squeeze(1)
+        sample_classes = Variable(sample_classes.to(torch.int)).to(device)
 
-    with open(f"{folder_name}/smiles/cgan_{epoch}.txt", 'w') as f:
-        for molecule in processed_molecules:
-            f.write(molecule)
-            f.write('\n')
-        f.close()
+        z = Variable(torch.normal(mean=0, std=1, size=(32, NOISE_DIM))).to(device)
+        sample_smiles = generator(z, sample_classes, sample_smiles)
+        # Translating smiles
 
-    with open(f"{folder_name}/classes/cgan_{epoch}.txt", 'w') as f:
-        for classes in all_gen_classes:
-            f.write('@'.join(classes))
-            f.write('\n')
-        f.close()
+        processed_molecules = translate_smiles(sample_smiles, dataset)
+        
+        for i in ("smiles", "classes"):
+            if not os.path.exists(f"{folder_name}/{i}"):
+                os.mkdir(f"{folder_name}/{i}")
+
+        # Translating classes
+        all_gen_classes = []
+        for cls in sample_classes:
+            all_gen_classes.append(dataset.classes_code[cls])
+        # Saving Generator State
+        generator_state = {'state_dict': generator.state_dict(), 'optimizer': g_optimizer.state_dict()}
+        torch.save(generator_state, f"{folder_name}/generator.pt")
+
+        # Saving Discriminator State
+        discriminator_state = {'state_dict': discriminator.state_dict(), 'optimizer': d_optimizer.state_dict()}
+        torch.save(discriminator_state, f"{folder_name}/discriminator.pt")
+
+        with open(f"{folder_name}/smiles/cgan_{epoch}.txt", 'w') as f:
+            for molecule in processed_molecules:
+                f.write(molecule)
+                f.write('\n')
+            f.close()
+
+        with open(f"{folder_name}/classes/cgan_{epoch}.txt", 'w') as f:
+            for classes in all_gen_classes:
+                f.write('@'.join(classes))
+                f.write('\n')
+            f.close()
 
     with open(f"{folder_name}/statistics.json", 'w') as f:
         json.dump(train_tracking, f)
@@ -518,7 +506,8 @@ def train(params, generator, discriminator, criterion, batch_size=None, num_epoc
                 continue
 
             real_smiles = Variable(smiles.to(torch.float)).to(device).squeeze(1)
-            
+            labels = Variable(labels.to(torch.int)).to(device)
+
             assert (labels<num_classes).all(), "target: {} invalid".format(labels)
 
             generator.train()
@@ -532,7 +521,7 @@ def train(params, generator, discriminator, criterion, batch_size=None, num_epoc
                                                 labels, num_classes)
 
             g_loss, g_rep_loss, g_disc_loss, g_untranslatable_loss  = generator_train_step(batch_size, discriminator, generator, g_optimizer,
-                                           criterion, labels, num_classes)
+                                           criterion, labels, num_classes, real_smiles)
             
             this_epock_tracking["D Loss"].append(d_loss)
             this_epock_tracking["D Real Loss"].append(d_real_loss)
@@ -555,14 +544,9 @@ d_real_loss: {:.2f}, d_fake_loss: {:.2f}  |  g_disc_loss: {:.2f}, g_untranslatab
                                 "G Untranslatable Loss":np.mean(this_epock_tracking["G Untranslatable Loss"]),
                                 "G Disc Loss":np.mean(this_epock_tracking["G Disc Loss"])
                                 }
-        
-        if epoch % display_step == 0:
-            z = Variable(torch.normal(mean=0, std=1, size=(32, NOISE_DIM))).to(device)
-            sample_classes = Variable(torch.randint(0, num_classes, size=(32,)).to(torch.long)).to(device)
-            sample_smiles = generator(z, sample_classes)
-            
-            save_state(generator, discriminator, g_optimizer, d_optimizer,
-                       epoch, sample_smiles, sample_classes, dataset, params, train_tracking)
+                    
+        save_state(generator, discriminator, g_optimizer, d_optimizer,
+                    epoch, dataset, train_tracking, display_step)
 
     return train_tracking
 
@@ -616,8 +600,8 @@ if __name__ == "__main__":
 
     params = {"learning_rate": [0.0001],
               "generator_lr_multiplier": [10, 5],
-              "batch_per_epoca": [128],
-              "min_dim":[64]}
+              "batch_per_epoca": [256, 128],
+              "min_dim":[128, 64]}
     
     params_combinations = list(product(*params.values()))
 
@@ -637,4 +621,4 @@ if __name__ == "__main__":
         discriminator = Discriminator(dataset.smiles_nodes, dataset.smiles.shape, dataset.classes.shape, dataset.unique_classes, MIN_DIM).to(device)
 
         data_loader = torch.utils.data.DataLoader(dataset, BPE, shuffle=True)
-        train(this_params, generator, discriminator, criterion, batch_size=BPE, num_epochs=10000, num_classes=dataset.unique_classes)    
+        train(this_params, generator, discriminator, criterion, batch_size=BPE, num_epochs=500, num_classes=dataset.unique_classes)    

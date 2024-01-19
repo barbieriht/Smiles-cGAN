@@ -213,23 +213,20 @@ class Generator(nn.Module):
         self.label_emb = nn.Embedding(self.unique_classes, self.unique_classes)
 
         self.encoder = nn.Sequential(
-            spectral_norm(nn.Linear(self.smiles_nodes + self.unique_classes, MIN_DIM)),
+            nn.Linear(self.smiles_nodes + self.unique_classes, MIN_DIM),
             nn.BatchNorm1d(MIN_DIM),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.3),
-            spectral_norm(nn.Linear(MIN_DIM, MIN_DIM//2)),
+            nn.Linear(MIN_DIM, MIN_DIM//2),
             nn.BatchNorm1d(MIN_DIM//2),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.3),
         )
 
         self.decoder = nn.Sequential(
-            spectral_norm(nn.Conv1d(MIN_DIM//2 + self.unique_classes + self.noise_dim, MIN_DIM, kernel_size=1)),
+            nn.Conv1d(MIN_DIM//2 + self.unique_classes + self.noise_dim, MIN_DIM, kernel_size=1),
             nn.BatchNorm1d(MIN_DIM),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.3),
             nn.Flatten(),
-            spectral_norm(nn.Linear(MIN_DIM, self.smiles_nodes)),
+            nn.Linear(MIN_DIM, self.smiles_nodes),
             nn.Tanh()
         )
 
@@ -265,21 +262,18 @@ class Discriminator(nn.Module):
 
         self.smile_input = nn.Sequential(
             spectral_norm(nn.Conv1d(self.smiles_nodes + self.unique_classes, MIN_DIM, kernel_size=1)),
-            nn.BatchNorm1d(MIN_DIM),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Dropout(0.3)
         )
 
         self.parallel1_ = nn.Sequential(
             spectral_norm(nn.Conv1d(MIN_DIM, MIN_DIM//2, kernel_size=1)),
-            nn.BatchNorm1d(MIN_DIM//2),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Dropout(0.3),
         )
 
         self.parallel_1 = nn.Sequential(
             spectral_norm(nn.Conv1d(MIN_DIM, MIN_DIM//4, kernel_size=1)),
-            nn.BatchNorm1d(MIN_DIM//4),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Dropout(0.3),
             nn.Flatten(),
@@ -288,7 +282,6 @@ class Discriminator(nn.Module):
 
         self.parallel2_ = nn.Sequential(
             spectral_norm(nn.Conv1d(MIN_DIM//2, MIN_DIM//4, kernel_size=1)),
-            nn.BatchNorm1d(MIN_DIM//4),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Dropout(0.3),
             nn.Flatten()
@@ -296,7 +289,6 @@ class Discriminator(nn.Module):
 
         self.parallel_2 = nn.Sequential(
             spectral_norm(nn.Conv1d(MIN_DIM//2, MIN_DIM//4, kernel_size=1)),
-            nn.BatchNorm1d(MIN_DIM//4),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Dropout(0.3),
             nn.Flatten(),

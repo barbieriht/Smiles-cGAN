@@ -37,9 +37,8 @@ class smiles_coder:
         self.int_to_char = None
         self.fitted = False
 
-        VOCAB_OPT = "dense_" if "dense_" in dataset_path else ""
         if os.path.exists(f"{VOCAB_OPT}_{TOKENIZER}_smiles_vocab.npz"):
-            self.load(VOCAB_OPT + 'old_smiles_vocab.npz')
+            self.load(f"{VOCAB_OPT}_{TOKENIZER}_smiles_vocab.npz")
 
     def fit(self, smiles_data, max_length = 150):
         for i in tqdm(range(len(smiles_data))):
@@ -641,7 +640,7 @@ if __name__ == "__main__":
         GEN_OPT = selected_params["gen_opt"]
         DATASET = selected_params["dataset"]
         GEN_OPT_STR = "ADAM" if GEN_OPT == torch.optim.Adam else ("SGD" if GEN_OPT == torch.optim.SGD else ("ADAMAX" if GEN_OPT == torch.optim.Adamax else "RMS"))
-        VOCAB_OPT = "DENSE" if "dense_" in DATASET else ""
+        VOCAB_OPT = "DENSE" if "dense_" in DATASET else "SPARSE"
         FOLDER_PATH = f"generated_files/{TOKENIZER}/{VOCAB_OPT}/{MIN_DIM}/{GEN_OPT_STR}/lr{LR}_gen{GLRM}_bs{BPE}"
 
         os.makedirs(FOLDER_PATH, exist_ok=True)

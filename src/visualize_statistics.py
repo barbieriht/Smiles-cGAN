@@ -9,7 +9,7 @@ def plot(statistics, path_to_save):
     d_columns = [column for column in df.columns if "D " in column]
     g_columns = [column for column in df.columns if "G " in column]
 
-    plt.figure(figsize=(14, 6))
+    plt.figure(figsize=(14, 14))
 
     # Plot "D " columns in the first subplot
     plt.subplot(2, 1, 1)

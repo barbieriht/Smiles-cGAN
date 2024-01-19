@@ -20,6 +20,8 @@ from visualize_statistics import plot
 from rdkit import Chem
 import random
 
+from rdkit.rdBase import BlockLogs
+
 SEED = 42
 random.seed(SEED)
 torch.manual_seed(SEED)
@@ -223,22 +225,17 @@ class Generator(nn.Module):
             spectral_norm(nn.Linear(self.smiles_nodes + self.unique_classes, MIN_DIM)),
             nn.BatchNorm1d(MIN_DIM),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.3),
             spectral_norm(nn.Linear(MIN_DIM, MIN_DIM//2)),
             nn.BatchNorm1d(MIN_DIM//2),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.3),
         )
 
-        self.rnn1 = nn.LSTM(MIN_DIM//2, MIN_DIM, bidirectional=True ,batch_first=True)
-
         self.decoder = nn.Sequential(
-            spectral_norm(nn.Conv1d(MIN_DIM*2 + self.unique_classes + self.noise_dim, MIN_DIM*2, kernel_size=1)),
-            nn.BatchNorm1d(MIN_DIM*2),
+            spectral_norm(nn.Conv1d(MIN_DIM//2 + self.unique_classes + self.noise_dim, MIN_DIM, kernel_size=1)),
+            nn.BatchNorm1d(MIN_DIM),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.3),
             nn.Flatten(),
-            spectral_norm(nn.Linear(MIN_DIM*2, self.smiles_nodes)),
+            spectral_norm(nn.Linear(MIN_DIM, self.smiles_nodes)),
             nn.Tanh()
         )
 
@@ -254,10 +251,55 @@ class Generator(nn.Module):
         x = torch.cat([rs.squeeze(1), c], 1)
 
         encoder_out = self.encoder(x)
+        y = torch.cat([encoder_out, c, z], 1)
+        
+        out = self.decoder(y.unsqueeze(-1))
+        
+        return out.squeeze()
 
-        lstm1_out, _ = self.rnn1(encoder_out.unsqueeze(1))
+class Generator(nn.Module):
+    def __init__(self, smiles_nodes, smiles_shape, classes_shape, unique_classes, noise_dim, MIN_DIM):
+        super().__init__()
+        self.smiles_nodes = smiles_nodes
+        self.smiles_shape = smiles_shape
 
-        y = torch.cat([lstm1_out.squeeze(1), c, z], 1)
+        self.classes_shape = classes_shape
+        self.unique_classes = unique_classes
+        self.noise_dim = noise_dim
+
+        self.label_emb = nn.Embedding(self.unique_classes, self.unique_classes)
+
+        self.encoder = nn.Sequential(
+            nn.Linear(self.smiles_nodes + self.unique_classes, MIN_DIM),
+            nn.BatchNorm1d(MIN_DIM),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Linear(MIN_DIM, MIN_DIM//2),
+            nn.BatchNorm1d(MIN_DIM//2),
+            nn.LeakyReLU(0.2, inplace=True),
+        )
+
+        self.decoder = nn.Sequential(
+            nn.Conv1d(MIN_DIM//2 + self.unique_classes + self.noise_dim, MIN_DIM, kernel_size=1),
+            nn.BatchNorm1d(MIN_DIM),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Flatten(),
+            nn.Linear(MIN_DIM, self.smiles_nodes),
+            nn.Tanh()
+        )
+
+    def forward(self, z, c, rs):
+        z = z.view(z.size(0), self.noise_dim)
+        rs = rs.view(rs.size(0), self.smiles_nodes)
+
+        assert torch.all(c >= 0)
+        assert torch.all(c < self.label_emb.num_embeddings)
+
+        c = self.label_emb(c)
+
+        x = torch.cat([rs.squeeze(1), c], 1)
+
+        encoder_out = self.encoder(x)
+        y = torch.cat([encoder_out, c, z], 1)
         
         out = self.decoder(y.unsqueeze(-1))
         
@@ -277,21 +319,18 @@ class Discriminator(nn.Module):
 
         self.smile_input = nn.Sequential(
             spectral_norm(nn.Conv1d(self.smiles_nodes + self.unique_classes, MIN_DIM, kernel_size=1)),
-            nn.BatchNorm1d(MIN_DIM),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Dropout(0.3)
         )
 
         self.parallel1_ = nn.Sequential(
             spectral_norm(nn.Conv1d(MIN_DIM, MIN_DIM//2, kernel_size=1)),
-            nn.BatchNorm1d(MIN_DIM//2),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Dropout(0.3),
         )
 
         self.parallel_1 = nn.Sequential(
             spectral_norm(nn.Conv1d(MIN_DIM, MIN_DIM//4, kernel_size=1)),
-            nn.BatchNorm1d(MIN_DIM//4),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Dropout(0.3),
             nn.Flatten(),
@@ -300,7 +339,6 @@ class Discriminator(nn.Module):
 
         self.parallel2_ = nn.Sequential(
             spectral_norm(nn.Conv1d(MIN_DIM//2, MIN_DIM//4, kernel_size=1)),
-            nn.BatchNorm1d(MIN_DIM//4),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Dropout(0.3),
             nn.Flatten()
@@ -308,7 +346,6 @@ class Discriminator(nn.Module):
 
         self.parallel_2 = nn.Sequential(
             spectral_norm(nn.Conv1d(MIN_DIM//2, MIN_DIM//4, kernel_size=1)),
-            nn.BatchNorm1d(MIN_DIM//4),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Dropout(0.3),
             nn.Flatten(),
@@ -386,7 +423,12 @@ def generator_train_step(batch_size, discriminator, generator, g_optimizer, crit
 
     translated_smiles = translate_smiles(fake_smiles, dataset)
 
+    block = BlockLogs()
+
     g_smiles_validity_loss = np.mean([float(1) if Chem.MolFromSmiles(this) == None else float(0) for this in translated_smiles])
+
+    del block
+
     untranslatable_loss = torch.tensor(math.log(1 + g_smiles_validity_loss) / math.log(2), requires_grad=True)
 
     g_repeated_loss = torch.tensor(math.log(1 + check_repeated(translated_smiles)) / math.log(2), requires_grad=True)
@@ -494,7 +536,7 @@ def load_states(generator, g_optimizer, discriminator, d_optimizer, this_params)
     GLRM = this_params["generator_lr_multiplier"]
     GEN_OPT = this_params["gen_opt"]
 
-    GEN_OPT_STR = "ADAM" if GEN_OPT == torch.optim.Adam else "SGD"
+    GEN_OPT_STR = "ADAM" if GEN_OPT == torch.optim.Adam else ("SGD" if GEN_OPT == torch.optim.SGD else ("ADAMAX" if GEN_OPT == torch.optim.Adamax else "RMS"))
 
     folder_name = f"./generated_files/{MIN_DIM}lr{LR}g{GLRM}_bpe{BPE}_{GEN_OPT_STR}"
 
@@ -539,7 +581,7 @@ def train(this_params, generator, discriminator, criterion, batch_size=None, num
     GLRM = this_params["generator_lr_multiplier"]
     GEN_OPT = this_params["gen_opt"]
     
-    GEN_OPT_STR = "ADAM" if GEN_OPT == torch.optim.Adam else "SGD"
+    GEN_OPT_STR = "ADAM" if GEN_OPT == torch.optim.Adam else ("SGD" if GEN_OPT == torch.optim.SGD else ("ADAMAX" if GEN_OPT == torch.optim.Adamax else "RMS"))
 
     if os.path.isfile(f"./generated_files/{MIN_DIM}lr{LR}g{GLRM}_bpe{BPE}_{GEN_OPT_STR}/statistics.json"):
         with open(f"./generated_files/{MIN_DIM}lr{LR}g{GLRM}_bpe{BPE}_{GEN_OPT_STR}/statistics.json", 'r') as file:
@@ -548,7 +590,7 @@ def train(this_params, generator, discriminator, criterion, batch_size=None, num
         train_tracking = {}
 
     d_optimizer = GEN_OPT(discriminator.parameters(), lr=LR)
-    g_optimizer = torch.optim.Adam(generator.parameters(), lr=GLRM*LR)
+    g_optimizer = GEN_OPT(generator.parameters(), lr=GLRM*LR)
     
     generator, g_optimizer, discriminator, d_optimizer, start_epoch = load_states(generator, g_optimizer, discriminator, d_optimizer, this_params)        
 
@@ -587,6 +629,8 @@ def train(this_params, generator, discriminator, criterion, batch_size=None, num
             this_epock_tracking["G Repetition Loss"].append(g_rep_loss)
             this_epock_tracking["G Disc Loss"].append(g_disc_loss)
             this_epock_tracking["G Untranslatable Loss"].append(g_untranslatable_loss)
+
+            os.system('clear')
 
             print('Training model >> Epoch: [{}/{}] -- Batch: [{}]\nd_loss: {:.2f}  |  g_loss: {:.2f}\n\
               |  g_disc_loss: {:.2f}, g_untranslatable_loss: {:.2f}, g_rep_loss: {:.2f}'.format(
@@ -635,7 +679,9 @@ if __name__ == "__main__":
               "min_dim":[64, 128, 256],
               "gen_opt":[
                             torch.optim.SGD,
-                            # torch.optim.Adam
+                            torch.optim.Adam,
+                            torch.optim.RMSprop,
+                            torch.optim.Adamax
                          ]
             }
     
@@ -652,7 +698,7 @@ if __name__ == "__main__":
         LR = this_params["learning_rate"]
         GLRM = this_params["generator_lr_multiplier"]
         GEN_OPT = this_params["gen_opt"]
-        GEN_OPT_STR = "ADAM" if GEN_OPT == torch.optim.Adam else "SGD"
+        GEN_OPT_STR = "ADAM" if GEN_OPT == torch.optim.Adam else ("SGD" if GEN_OPT == torch.optim.SGD else ("ADAMAX" if GEN_OPT == torch.optim.Adamax else "RMS"))
 
         criterion = nn.BCELoss()
         generator = Generator(dataset.smiles_nodes, dataset.smiles.shape, dataset.classes.shape, dataset.unique_classes, NOISE_DIM, MIN_DIM).to(device)

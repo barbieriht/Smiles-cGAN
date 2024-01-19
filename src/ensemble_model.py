@@ -545,11 +545,11 @@ def train(this_params, generator, discriminator, criterion, batch_size=None, num
     d_optimizer = GEN_OPT(discriminator.parameters(), lr=LR)
     g_optimizer = torch.optim.Adam(generator.parameters(), lr=GLRM*LR)
     
-    generator, g_optimizer, discriminator, d_optimizer, start_epoch = load_states(generator, g_optimizer, discriminator, d_optimizer, params)        
+    generator, g_optimizer, discriminator, d_optimizer, start_epoch = load_states(generator, g_optimizer, discriminator, d_optimizer, this_params)        
 
     for epoch in range(start_epoch, num_epochs+1):
         this_epock_tracking = {"D Loss":[], "D Real Loss":[], "D Fake Loss":[], "G Loss":[],
-                                 "G Repeatition Loss":[], "G Disc Loss":[], "G Untranslatable Loss":[]}
+                                 "G Untranslatable Loss":[], "G Disc Loss":[], "G Repetition Loss":[]}
         
         for i, (smiles, labels) in enumerate(data_loader):
 
@@ -577,9 +577,9 @@ def train(this_params, generator, discriminator, criterion, batch_size=None, num
 
             this_epock_tracking["D Loss"].append(d_loss)
             this_epock_tracking["G Loss"].append(g_loss)
-            this_epock_tracking["G Untranslatable Loss"].append(g_untranslatable_loss)
+            this_epock_tracking["G Repetition Loss"].append(g_rep_loss)
             this_epock_tracking["G Disc Loss"].append(g_disc_loss)
-            this_epock_tracking["G Repeatition Loss"].append(g_rep_loss)
+            this_epock_tracking["G Untranslatable Loss"].append(g_untranslatable_loss)
             print('Training model >> Epoch: [{}/{}] -- Batch: [{}]\nd_loss: {:.2f}  |  g_loss: {:.2f}\n\
               |  g_disc_loss: {:.2f}, g_untranslatable_loss: {:.2f}, g_rep_loss: {:.2f}'.format(
                         epoch, num_epochs, i, d_loss, g_loss, g_disc_loss, g_untranslatable_loss, g_rep_loss))
@@ -588,9 +588,9 @@ def train(this_params, generator, discriminator, criterion, batch_size=None, num
 
         train_tracking[epoch] = {"D Loss":np.mean(this_epock_tracking["D Loss"]),
                                 "G Loss":np.mean(this_epock_tracking["G Loss"]),
-                                "G Repeatition Loss":np.mean(this_epock_tracking["G Repeatition Loss"]),
+                                "G Untranslatable Loss":np.mean(this_epock_tracking["G Untranslatable Loss"]),
                                 "G Disc Loss":np.mean(this_epock_tracking["G Disc Loss"]),
-                                "G Untranslatable Loss":np.mean(this_epock_tracking["G Untranslatable Loss"])
+                                "G Repetition Loss":np.mean(this_epock_tracking["G Repetition Loss"])
                                 }
         
         if g_loss < best_validation_loss and g_loss < 1:

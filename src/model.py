@@ -193,7 +193,10 @@ def get_hot_smiles(file_name):
 
         unique_elements = list(classes_vocab.keys())
 
-    processed_molecules, smiles_max_length = preprocessing_data(molecules, replace_dict)
+    if TOKENIZER == "ATOM":
+        processed_molecules, smiles_max_length = preprocessing_data(molecules, replace_dict)
+    else:
+        processed_molecules, smiles_max_length = preprocessing_data(molecules)
 
     ######## TURNING TO ONE HOT ########
     coder = smiles_coder(selected_params['dataset'])
@@ -482,7 +485,7 @@ def save_state(generator, discriminator, g_optimizer, d_optimizer,
         json.dump(train_tracking, f)
         f.close()
 
-    plot(f"{FOLDER_PATH}/statistics.json", path_to_save=FOLDER_PATH)
+    plot(f"{FOLDER_PATH}/statistics.json", path_to_save=FOLDER_PATH, file_name=f"{TOKENIZER}_{VOCAB_OPT}_{MIN_DIM}_{GEN_OPT_STR}_lr{LR}_gen{GLRM}_bs{BPE}")
 
 def load_states(generator, g_optimizer, discriminator, d_optimizer):
     def extract_single_integer_from_string(input_string):
@@ -571,11 +574,14 @@ def train(generator, discriminator, criterion, batch_size=None, num_epochs = 100
             this_epock_tracking["G Disc Loss"].append(g_disc_loss)
             this_epock_tracking["G Untranslatable Loss"].append(g_untranslatable_loss)
 
-            os.system('clear')
+            
+            if i%5==0:
+                os.system('clear')
 
-            print('Training model >> Epoch: [{}/{}] -- Batch: [{}]\nd_loss: {:.2f}  |  g_loss: {:.2f}\n\
-              |  g_disc_loss: {:.2f}, g_untranslatable_loss: {:.2f}, g_rep_loss: {:.2f}'.format(
-                        epoch, num_epochs, i, d_loss, g_loss, g_disc_loss, g_untranslatable_loss, g_rep_loss))
+                print(selected_params)
+                print('Training model >> Epoch: [{}/{}] -- Batch: [{}]\nd_loss: {:.2f}  |  g_loss: {:.2f}\n\
+                |  g_disc_loss: {:.2f}, g_untranslatable_loss: {:.2f}, g_rep_loss: {:.2f}'.format(
+                            epoch, num_epochs, i, d_loss, g_loss, g_disc_loss, g_untranslatable_loss, g_rep_loss))
 
         generator.eval()
 
@@ -613,9 +619,9 @@ if __name__ == "__main__":
               "tokenizer":["ATOM", "FRAGMENT"],
               "noise_dim":[50],
               "batch_per_epoca": [128, 64],
-              "generator_lr_multiplier": [1, 2, 5],
+              "generator_lr_multiplier": [1, 5],
               "min_dim":[64, 128],
-              "learning_rate": [0.00001, 0.0001, 0.001],
+              "learning_rate": [0.00001, 0.001],
               "gen_opt":[
                             torch.optim.RMSprop,
                             torch.optim.Adamax,
@@ -654,4 +660,4 @@ if __name__ == "__main__":
         discriminator = Discriminator(dataset.smiles_nodes, dataset.smiles.shape, dataset.classes.shape, dataset.unique_classes, MIN_DIM).to(device)
 
         data_loader = torch.utils.data.DataLoader(dataset, BPE, shuffle=True)
-        train(generator, discriminator, criterion, batch_size=BPE, num_epochs=500, num_classes=dataset.unique_classes)    
+        train(generator, discriminator, criterion, batch_size=BPE, num_epochs=300, num_classes=dataset.unique_classes)    

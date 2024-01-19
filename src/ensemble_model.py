@@ -223,9 +223,11 @@ class Generator(nn.Module):
             spectral_norm(nn.Linear(self.smiles_nodes + self.unique_classes, MIN_DIM)),
             nn.BatchNorm1d(MIN_DIM),
             nn.LeakyReLU(0.2, inplace=True),
+            nn.Dropout(0.3),
             spectral_norm(nn.Linear(MIN_DIM, MIN_DIM//2)),
             nn.BatchNorm1d(MIN_DIM//2),
             nn.LeakyReLU(0.2, inplace=True),
+            nn.Dropout(0.3),
         )
 
         self.rnn1 = nn.LSTM(MIN_DIM//2, MIN_DIM, bidirectional=True ,batch_first=True)
@@ -234,6 +236,7 @@ class Generator(nn.Module):
             spectral_norm(nn.Conv1d(MIN_DIM*2 + self.unique_classes + self.noise_dim, MIN_DIM*2, kernel_size=1)),
             nn.BatchNorm1d(MIN_DIM*2),
             nn.LeakyReLU(0.2, inplace=True),
+            nn.Dropout(0.3),
             nn.Flatten(),
             spectral_norm(nn.Linear(MIN_DIM*2, self.smiles_nodes)),
             nn.Tanh()
@@ -276,21 +279,21 @@ class Discriminator(nn.Module):
             spectral_norm(nn.Conv1d(self.smiles_nodes + self.unique_classes, MIN_DIM, kernel_size=1)),
             nn.BatchNorm1d(MIN_DIM),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.2)
+            nn.Dropout(0.3)
         )
 
         self.parallel1_ = nn.Sequential(
             spectral_norm(nn.Conv1d(MIN_DIM, MIN_DIM//2, kernel_size=1)),
             nn.BatchNorm1d(MIN_DIM//2),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.2),
+            nn.Dropout(0.3),
         )
 
         self.parallel_1 = nn.Sequential(
             spectral_norm(nn.Conv1d(MIN_DIM, MIN_DIM//4, kernel_size=1)),
             nn.BatchNorm1d(MIN_DIM//4),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.2),
+            nn.Dropout(0.3),
             nn.Flatten(),
             spectral_norm(nn.Linear(MIN_DIM//4, 1))
         )
@@ -299,7 +302,7 @@ class Discriminator(nn.Module):
             spectral_norm(nn.Conv1d(MIN_DIM//2, MIN_DIM//4, kernel_size=1)),
             nn.BatchNorm1d(MIN_DIM//4),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.2),
+            nn.Dropout(0.3),
             nn.Flatten()
         )
 
@@ -307,7 +310,7 @@ class Discriminator(nn.Module):
             spectral_norm(nn.Conv1d(MIN_DIM//2, MIN_DIM//4, kernel_size=1)),
             nn.BatchNorm1d(MIN_DIM//4),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.2),
+            nn.Dropout(0.3),
             nn.Flatten(),
             spectral_norm(nn.Linear(MIN_DIM//4, 1))
         )
@@ -345,7 +348,6 @@ def check_repeated(data_list):
 
     return 1-len(unique_list)/len(data_list)
 
-# Generator Loss Function
 def generator_loss(validity, criterion):
     total_loss = 0.0
 
@@ -356,9 +358,9 @@ def generator_loss(validity, criterion):
 
     return total_loss / len(validity)
 
-# Discriminator Loss Function
 def discriminator_loss(real_validity, fake_validity, criterion):
-    total_loss = 0.0
+    total_real_loss = 0.0
+    total_fake_loss = 0.0
 
     for k, (r_guess, f_guess) in enumerate(zip(real_validity, fake_validity)):
         modulating_factor_real = (1 - r_guess)**2
@@ -367,9 +369,10 @@ def discriminator_loss(real_validity, fake_validity, criterion):
         loss_real = modulating_factor_real * criterion(r_guess, torch.ones_like(r_guess).to(device))
         loss_fake = modulating_factor_fake * criterion(f_guess, torch.zeros_like(f_guess).to(device))
         
-        total_loss += loss_real + loss_fake
+        total_real_loss += loss_real
+        total_fake_loss += loss_fake
 
-    return total_loss / len(real_validity)
+    return total_real_loss / len(real_validity), total_fake_loss / len(fake_validity)
 
 def generator_train_step(batch_size, discriminator, generator, g_optimizer, criterion, labels, num_classes, real_smiles):
     g_optimizer.zero_grad()
@@ -392,11 +395,9 @@ def generator_train_step(batch_size, discriminator, generator, g_optimizer, crit
     
     g_discriminator_loss = torch.sum(generator_loss(validity, criterion))
     
-    g_loss =  g_discriminator_loss + untranslatable_loss + g_repeated_loss
+    g_loss = ( g_discriminator_loss + untranslatable_loss + g_repeated_loss)**2
     
     g_loss.backward()
-    untranslatable_loss.backward()
-    g_repeated_loss.backward()
     g_optimizer.step()
     return g_loss.data.item(), g_repeated_loss.data.item(), g_discriminator_loss.data.item(), untranslatable_loss.data.item()
 
@@ -412,11 +413,15 @@ def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, 
     fake_smiles = generator(z, fake_labels, real_smiles)
     fake_validity = discriminator(fake_smiles, fake_labels)
 
-    d_loss = torch.sum(discriminator_loss(real_validity, fake_validity, criterion))
+    d_real_loss, d_fake_loss = discriminator_loss(real_validity, fake_validity, criterion)
+    d_real_loss = torch.sum(d_real_loss)
+    d_fake_loss = torch.sum(d_fake_loss)
+
+    d_loss = d_real_loss + d_fake_loss
 
     d_loss.backward()
     d_optimizer.step()
-    return d_loss.data.item()
+    return d_loss.data.item(), d_real_loss.data.item(), d_fake_loss.data.item()
 
 def save_state(generator, discriminator, g_optimizer, d_optimizer,
                epoch, dataset, train_tracking, save_model_in, force_save):
@@ -567,7 +572,7 @@ def train(this_params, generator, discriminator, criterion, batch_size=None, num
                 batch_size = real_smiles.size(0)
                 
 
-            d_loss = discriminator_train_step(batch_size, discriminator,
+            d_loss, d_real, d_fake = discriminator_train_step(batch_size, discriminator,
                                                 generator, d_optimizer, criterion, real_smiles,
                                                 labels, num_classes)
 
@@ -576,10 +581,13 @@ def train(this_params, generator, discriminator, criterion, batch_size=None, num
             
 
             this_epock_tracking["D Loss"].append(d_loss)
+            this_epock_tracking["D Real Loss"].append(d_real)
+            this_epock_tracking["D Fake Loss"].append(d_fake)
             this_epock_tracking["G Loss"].append(g_loss)
             this_epock_tracking["G Repetition Loss"].append(g_rep_loss)
             this_epock_tracking["G Disc Loss"].append(g_disc_loss)
             this_epock_tracking["G Untranslatable Loss"].append(g_untranslatable_loss)
+
             print('Training model >> Epoch: [{}/{}] -- Batch: [{}]\nd_loss: {:.2f}  |  g_loss: {:.2f}\n\
               |  g_disc_loss: {:.2f}, g_untranslatable_loss: {:.2f}, g_rep_loss: {:.2f}'.format(
                         epoch, num_epochs, i, d_loss, g_loss, g_disc_loss, g_untranslatable_loss, g_rep_loss))
@@ -587,6 +595,8 @@ def train(this_params, generator, discriminator, criterion, batch_size=None, num
         generator.eval()
 
         train_tracking[epoch] = {"D Loss":np.mean(this_epock_tracking["D Loss"]),
+                                 "D Real Loss":np.mean(this_epock_tracking["D Real Loss"]),
+                                 "D Fake Loss":np.mean(this_epock_tracking["D Fake Loss"]),
                                 "G Loss":np.mean(this_epock_tracking["G Loss"]),
                                 "G Untranslatable Loss":np.mean(this_epock_tracking["G Untranslatable Loss"]),
                                 "G Disc Loss":np.mean(this_epock_tracking["G Disc Loss"]),
@@ -596,7 +606,7 @@ def train(this_params, generator, discriminator, criterion, batch_size=None, num
         if g_loss < best_validation_loss and g_loss < 1:
             best_validation_loss = g_loss
             current_patience = 0
-        else:
+        elif best_validation_loss < 1:
             current_patience += 1
 
         if current_patience >= patience:
@@ -612,7 +622,7 @@ def train(this_params, generator, discriminator, criterion, batch_size=None, num
     return train_tracking
 
 if __name__ == "__main__":
-    NOISE_DIM = 100
+    NOISE_DIM = 50
     patience = 5
 
     dataset = DrugLikeMolecules(file_path='chebi_selected_smiles.txt'
@@ -623,7 +633,10 @@ if __name__ == "__main__":
               "learning_rate": [0.0001, 0.00001],
               "generator_lr_multiplier": [2, 5],
               "min_dim":[64, 128, 256],
-              "gen_opt":[torch.optim.SGD, torch.optim.Adam]
+              "gen_opt":[
+                            torch.optim.SGD,
+                            # torch.optim.Adam
+                         ]
             }
     
     params_combinations = list(product(*params.values()))

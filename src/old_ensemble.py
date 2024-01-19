@@ -20,6 +20,8 @@ from visualize_statistics import plot
 from rdkit import Chem
 import random
 
+from rdkit.rdBase import BlockLogs
+
 SEED = 42
 random.seed(SEED)
 torch.manual_seed(SEED)
@@ -221,15 +223,13 @@ class Generator(nn.Module):
             nn.Dropout(0.3),
         )
 
-        self.rnn1 = nn.LSTM(MIN_DIM//2, MIN_DIM, bidirectional=True ,batch_first=True)
-
         self.decoder = nn.Sequential(
-            spectral_norm(nn.Conv1d(MIN_DIM*2 + self.unique_classes + self.noise_dim, MIN_DIM*2, kernel_size=1)),
-            nn.BatchNorm1d(MIN_DIM*2),
+            spectral_norm(nn.Conv1d(MIN_DIM//2 + self.unique_classes + self.noise_dim, MIN_DIM, kernel_size=1)),
+            nn.BatchNorm1d(MIN_DIM),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Dropout(0.3),
             nn.Flatten(),
-            spectral_norm(nn.Linear(MIN_DIM*2, self.smiles_nodes)),
+            spectral_norm(nn.Linear(MIN_DIM, self.smiles_nodes)),
             nn.Tanh()
         )
 
@@ -245,10 +245,7 @@ class Generator(nn.Module):
         x = torch.cat([rs.squeeze(1), c], 1)
 
         encoder_out = self.encoder(x)
-
-        lstm1_out, _ = self.rnn1(encoder_out.unsqueeze(1))
-
-        y = torch.cat([lstm1_out.squeeze(1), c, z], 1)
+        y = torch.cat([encoder_out, c, z], 1)
         
         out = self.decoder(y.unsqueeze(-1))
         
@@ -379,12 +376,15 @@ def generator_train_step(batch_size, discriminator, generator, g_optimizer, crit
 
     translated_smiles = translate_smiles(fake_smiles, dataset)
 
+    block = BlockLogs()
+
     g_smiles_validity_loss = np.mean([float(1) if Chem.MolFromSmiles(this) == None else float(0) for this in translated_smiles])
+
+    del block
+        
     untranslatable_loss = torch.tensor(math.log(1 + g_smiles_validity_loss) / math.log(2), requires_grad=True)
 
     g_repeated_loss = torch.tensor(math.log(1 + check_repeated(translated_smiles)) / math.log(2), requires_grad=True)
-
-    os.system('clear')
     
     g_discriminator_loss = torch.sum(generator_loss(validity, criterion))
     
@@ -487,7 +487,7 @@ def load_states(generator, g_optimizer, discriminator, d_optimizer, this_params)
     GLRM = this_params["generator_lr_multiplier"]
     GEN_OPT = this_params["gen_opt"]
 
-    GEN_OPT_STR = "ADAM" if GEN_OPT == torch.optim.Adam else "SGD"
+    GEN_OPT_STR = "ADAM" if GEN_OPT == torch.optim.Adam else ("SGD" if GEN_OPT == torch.optim.SGD else ("ADAMAX" if GEN_OPT == torch.optim.Adamax else "RMS"))
 
     folder_name = f"./old_generated_files/{MIN_DIM}lr{LR}g{GLRM}_bpe{BPE}_{GEN_OPT_STR}"
 
@@ -532,7 +532,7 @@ def train(this_params, generator, discriminator, criterion, batch_size=None, num
     GLRM = this_params["generator_lr_multiplier"]
     GEN_OPT = this_params["gen_opt"]
     
-    GEN_OPT_STR = "ADAM" if GEN_OPT == torch.optim.Adam else "SGD"
+    GEN_OPT_STR = "ADAM" if GEN_OPT == torch.optim.Adam else ("SGD" if GEN_OPT == torch.optim.SGD else ("ADAMAX" if GEN_OPT == torch.optim.Adamax else "RMS"))
 
     if os.path.isfile(f"./old_generated_files/{MIN_DIM}lr{LR}g{GLRM}_bpe{BPE}_{GEN_OPT_STR}/statistics.json"):
         with open(f"./old_generated_files/{MIN_DIM}lr{LR}g{GLRM}_bpe{BPE}_{GEN_OPT_STR}/statistics.json", 'r') as file:
@@ -581,6 +581,8 @@ def train(this_params, generator, discriminator, criterion, batch_size=None, num
             this_epock_tracking["G Disc Loss"].append(g_disc_loss)
             this_epock_tracking["G Untranslatable Loss"].append(g_untranslatable_loss)
 
+            os.system('clear')
+
             print('Training model >> Epoch: [{}/{}] -- Batch: [{}]\nd_loss: {:.2f}  |  g_loss: {:.2f}\n\
               |  g_disc_loss: {:.2f}, g_untranslatable_loss: {:.2f}, g_rep_loss: {:.2f}'.format(
                         epoch, num_epochs, i, d_loss, g_loss, g_disc_loss, g_untranslatable_loss, g_rep_loss))
@@ -622,13 +624,15 @@ if __name__ == "__main__":
                                 )
 
     params = {
-              "batch_per_epoca": [64, 128],
-              "learning_rate": [0.0001, 0.00001],
+              "batch_per_epoca": [128, 64],
               "generator_lr_multiplier": [2, 5],
               "min_dim":[64, 128],
+              "learning_rate": [0.001, 0.0001],
               "gen_opt":[
                             torch.optim.SGD,
-                            torch.optim.Adam
+                            torch.optim.Adam,
+                            torch.optim.RMSprop,
+                            torch.optim.Adamax
                          ]
             }
     
@@ -645,11 +649,11 @@ if __name__ == "__main__":
         LR = this_params["learning_rate"]
         GLRM = this_params["generator_lr_multiplier"]
         GEN_OPT = this_params["gen_opt"]
-        GEN_OPT_STR = "ADAM" if GEN_OPT == torch.optim.Adam else "SGD"
+        GEN_OPT_STR = "ADAM" if GEN_OPT == torch.optim.Adam else ("SGD" if GEN_OPT == torch.optim.SGD else ("ADAMAX" if GEN_OPT == torch.optim.Adamax else "RMS"))
 
         criterion = nn.BCELoss()
         generator = Generator(dataset.smiles_nodes, dataset.smiles.shape, dataset.classes.shape, dataset.unique_classes, NOISE_DIM, MIN_DIM).to(device)
         discriminator = Discriminator(dataset.smiles_nodes, dataset.smiles.shape, dataset.classes.shape, dataset.unique_classes, MIN_DIM).to(device)
 
         data_loader = torch.utils.data.DataLoader(dataset, BPE, shuffle=True)
-        train(this_params, generator, discriminator, criterion, batch_size=BPE, num_epochs=1000, num_classes=dataset.unique_classes)    
+        train(this_params, generator, discriminator, criterion, batch_size=BPE, num_epochs=500, num_classes=dataset.unique_classes)    

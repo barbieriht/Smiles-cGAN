@@ -5,20 +5,34 @@ import numpy as np
 def plot(statistics, path_to_save):
     df = pd.read_json(statistics).transpose()
 
-    plt.figure(figsize=(10, 6))
+    # Split columns into "D " and "G " groups
+    d_columns = [column for column in df.columns if "D " in column]
+    g_columns = [column for column in df.columns if "G " in column]
 
-    hot_colors = plt.cm.hot(np.linspace(0.25, 0.75, len(df.columns)))
-    cold_colors = plt.cm.cool(np.linspace(0.25, 0.75, len(df.columns)))
+    plt.figure(figsize=(14, 6))
 
-    for i, column in enumerate(df.columns):
-        if "G_" in column:
-            plt.plot(df.index, df[column], label=column, color=hot_colors[i])
-        else:
-            plt.plot(df.index, df[column], label=column, color=cold_colors[i])
+    # Plot "D " columns in the first subplot
+    plt.subplot(2, 1, 1)
+    for i, column in enumerate(d_columns):
+        plt.plot(df.index, df[column], label=column)
 
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
-    plt.title('Losses Over Epochs')
+    plt.title('D Losses Over Epochs')
     plt.legend()
-    
+
+    # Plot "G " columns in the second subplot
+    plt.subplot(2, 1, 2)
+    for i, column in enumerate(g_columns):
+        plt.plot(df.index, df[column], label=column)
+
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('G Losses Over Epochs')
+    plt.legend()
+
+    # Adjust layout for better spacing
+    plt.tight_layout()
+
+    # Save the plot
     plt.savefig(f'{path_to_save}/plot.png')

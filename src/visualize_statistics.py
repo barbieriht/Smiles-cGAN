@@ -2,7 +2,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 
-def plot(statistics, path_to_save):
+def plot(statistics, path_to_save, file_name):
     df = pd.read_json(statistics).transpose()
 
     # Split columns into "D " and "G " groups
@@ -35,4 +35,4 @@ def plot(statistics, path_to_save):
     plt.tight_layout()
 
     # Save the plot
-    plt.savefig(f'{path_to_save}/plot.png')
+    plt.savefig(f'{path_to_save}/{file_name}.png')

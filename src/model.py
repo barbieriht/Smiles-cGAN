@@ -31,7 +31,7 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 # device = "cpu"
     
 class smiles_coder:
-    def __init__(self, dataset_path):
+    def __init__(self):
         self.char_set = set([' '])
         self.char_to_int = None
         self.int_to_char = None
@@ -42,7 +42,10 @@ class smiles_coder:
 
     def fit(self, smiles_data, max_length = 150):
         for i in tqdm(range(len(smiles_data))):
-            smiles_data[i] = smiles_data[i].ljust(max_length)
+            if TOKENIZER == "ATOM":
+                smiles_data[i] = smiles_data[i].ljust(max_length)
+            else:
+                smiles_data[i] = smiles_data[i] + [" "] * max(0, self.max_length - len(smiles_data[i]))
             self.char_set = self.char_set.union(set(smiles_data[i]))
         self.max_length = max_length
         self.n_class = len(self.char_set)
@@ -55,7 +58,10 @@ class smiles_coder:
             raise ValueError('smiles coder is not fitted')
         m = []
         for i in tqdm(range(len(smiles_data))):
-            smiles_data[i] = smiles_data[i].ljust(self.max_length)
+            if TOKENIZER == "ATOM":
+                smiles_data[i] = smiles_data[i].ljust(self.max_length)
+            else:
+                smiles_data[i] = smiles_data[i] + [" "] * max(0, self.max_length - len(smiles_data[i]))
             chars = smiles_data[i]
             l = np.zeros((self.max_length, self.n_class))
             for t, char in enumerate(chars):
@@ -199,7 +205,7 @@ def get_hot_smiles(file_name):
         processed_molecules, smiles_max_length = preprocessing_data(molecules)
 
     ######## TURNING TO ONE HOT ########
-    coder = smiles_coder(selected_params['dataset'])
+    coder = smiles_coder()
     if not os.path.exists(f'{VOCAB_OPT}_{TOKENIZER}_smiles_vocab.npz'):
         coder.fit(processed_molecules, smiles_max_length)
         coder.save(f'{VOCAB_OPT}_{TOKENIZER}_smiles_vocab.npz')

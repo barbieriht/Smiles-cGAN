@@ -502,7 +502,7 @@ def save_state(generator, discriminator, g_optimizer, d_optimizer,
         json.dump(train_tracking, f)
         f.close()
 
-    plot(f"{FOLDER_PATH}/statistics.json", path_to_save=FOLDER_PATH, file_name=f"{TOKENIZER}_{VOCAB_OPT}_{MIN_DIM}_lr{LR}_gen{GLRM}_bs{BPE}")
+    plot(f"{FOLDER_PATH}/statistics.json", path_to_save=FOLDER_PATH, file_name=f"{TOKENIZER}_{VOCAB_OPT}_{MIN_DIM}_{GEN_OPT_STR}_lr{LR}_gen{GLRM}_bs{BPE}")
 
 def load_states(generator, g_optimizer, discriminator, d_optimizer):
     def extract_single_integer_from_string(input_string):
@@ -550,8 +550,8 @@ def train(generator, discriminator, criterion, batch_size=None, num_epochs = 100
     else:
         train_tracking = {}
 
-    d_optimizer = torch.optim.Adam(discriminator.parameters(), lr=LR, weight_decay=0.001)
-    g_optimizer = torch.optim.Adam(generator.parameters(), lr=GLRM*LR, weight_decay=0.001)
+    d_optimizer = GEN_OPT(discriminator.parameters(), lr=LR, weight_decay=0.001)
+    g_optimizer = GEN_OPT(generator.parameters(), lr=GLRM*LR, weight_decay=0.001)
     
     generator, g_optimizer, discriminator, d_optimizer, start_epoch = load_states(generator, g_optimizer, discriminator, d_optimizer)        
 
@@ -600,6 +600,10 @@ def train(generator, discriminator, criterion, batch_size=None, num_epochs = 100
                 print('Training model >> Epoch: [{}/{}] -- Batch: [{}]\nd_loss: {:.7f}  |  g_loss: {:.7f}\n\
                 |  g_disc_loss: {:.7f}, g_untranslatable_loss: {:.7f}, g_rep_loss: {:.7f}, g_vae_loss {:.7f}'.format(
                             epoch, num_epochs, i, d_loss, g_loss, g_disc_loss, g_untranslatable_loss, g_rep_loss, g_vae_loss))
+                
+
+                print('Best val:', best_validation_loss)
+                print('Current patience:', current_patience)
 
         generator.eval()
 
@@ -612,15 +616,22 @@ def train(generator, discriminator, criterion, batch_size=None, num_epochs = 100
                                 "G Repetition Loss":np.mean(this_epock_tracking["G Repetition Loss"]),
                                 "G VAE Loss":np.mean(this_epock_tracking["G VAE Loss"])
                                 }
-        
-        if g_loss < best_validation_loss and g_loss < 1:
-            best_validation_loss = g_loss
+
+
+        if np.mean(this_epock_tracking["G Loss"]) < best_validation_loss:
+            best_validation_loss = np.mean(this_epock_tracking["G Loss"])
             current_patience = 0
-        elif best_validation_loss < 1:
+
+            if epoch >= 50:
+                save_state(generator, discriminator, g_optimizer, d_optimizer,
+                        epoch, dataset, train_tracking, display_step,
+                        force_break, True)
+        else:
             current_patience += 1
 
         if current_patience >= patience:
             force_break = True
+
 
         save_state(generator, discriminator, g_optimizer, d_optimizer,
                     epoch, dataset, train_tracking, display_step,
@@ -638,11 +649,17 @@ if __name__ == "__main__":
 
     params = {
               "tokenizer":["ATOM", "FRAGMENT"],
-              "latent_dim":[50],
+              "latent_dim":[64],
               "batch_per_epoca": [64],
               "generator_lr_multiplier": [5],
               "min_dim":[128],
               "learning_rate": [0.00001],
+              "gen_opt":[
+                            torch.optim.RMSprop,
+                            torch.optim.Adamax,
+                            torch.optim.SGD,
+                            torch.optim.Adam,
+                         ],
               "dataset":['chebi_selected_smiles.txt', 'dense_chebi_selected_smiles.txt']
             }
     
@@ -660,7 +677,10 @@ if __name__ == "__main__":
         GLRM = selected_params["generator_lr_multiplier"]
         DATASET = selected_params["dataset"]
         VOCAB_OPT = "DENSE" if "dense_" in DATASET else "SPARSE"
-        FOLDER_PATH = f"generated_files/{TOKENIZER}/{VOCAB_OPT}/{MIN_DIM}/lr{LR}_gen{GLRM}_bs{BPE}"
+        GEN_OPT = selected_params["gen_opt"]
+        GEN_OPT_STR = "ADAM" if GEN_OPT == torch.optim.Adam else ("SGD" if GEN_OPT == torch.optim.SGD else ("ADAMAX" if GEN_OPT == torch.optim.Adamax else "RMS"))
+
+        FOLDER_PATH = f"generated_files/{TOKENIZER}/{VOCAB_OPT}/{MIN_DIM}/{GEN_OPT_STR}/lr{LR}_gen{GLRM}_bs{BPE}"
 
         os.makedirs(FOLDER_PATH, exist_ok=True)
 

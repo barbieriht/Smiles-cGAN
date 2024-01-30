@@ -249,7 +249,7 @@ class Generator(nn.Module):
         )
 
         self.encoder = nn.Sequential(
-            nn.Linear(2*self.smiles_nodes, MIN_DIM),
+            nn.Linear(2*self.smiles_nodes + self.latent_dim, MIN_DIM),
             nn.LeakyReLU(0.2),
             nn.Linear(MIN_DIM, self.latent_dim),
             nn.LeakyReLU(0.2)
@@ -280,11 +280,11 @@ class Generator(nn.Module):
     def decode(self, x):
         return self.decoder(x)
 
-    def forward(self, c, x):
+    def forward(self, c, x, z):
         x = x.view(x.size(0), self.smiles_nodes)
         c = self.label_emb(c)
 
-        x = torch.cat([x.squeeze(1), c], 1)
+        x = torch.cat([x.squeeze(1), c, z.squeeze(1)], 1)
 
         mean, logvar = self.encode(x)
         z = self.reparameterization(mean, logvar)
@@ -408,8 +408,9 @@ def generator_train_step(batch_size, discriminator, generator, g_optimizer, crit
     g_optimizer.zero_grad()
     
     fake_labels = Variable(torch.randint(0, num_classes, size=labels.shape).to(torch.int)).to(device)
+    z = Variable(torch.normal(mean=0, std=1, size=(batch_size, LATENT_DIM))).to(device)
 
-    fake_smiles, mean, logvar = generator(fake_labels, real_smiles)
+    fake_smiles, mean, logvar = generator(fake_labels, real_smiles, z)
 
     vae_loss = vae_loss_function(real_smiles, fake_smiles, mean, logvar)
 
@@ -441,7 +442,9 @@ def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, 
 
     # train with fake smiles
     fake_labels = Variable(torch.randint(0, num_classes, size=labels.shape).to(torch.int)).to(device)
-    fake_smiles, _, _ = generator(fake_labels, real_smiles)
+    z = Variable(torch.normal(mean=0, std=1, size=(batch_size, LATENT_DIM))).to(device)
+
+    fake_smiles, _, _ = generator(fake_labels, real_smiles, z)
     fake_validity = discriminator(fake_smiles, fake_labels)
 
     d_real_loss, d_fake_loss = discriminator_loss(real_validity, fake_validity, criterion)
@@ -459,7 +462,7 @@ def save_state(generator, discriminator, g_optimizer, d_optimizer,
                force_break = False, force_save = False):
 
     print('Saving state...')
-    if epoch % save_model_in == 0 and force_break == False or force_save == True:    
+    if epoch % save_model_in == 0 and force_break == False or force_save == True:   
 
         for batch in generator_loader:
             sample_smiles, sample_classes = batch
@@ -467,8 +470,9 @@ def save_state(generator, discriminator, g_optimizer, d_optimizer,
 
         sample_smiles = Variable(sample_smiles.to(torch.float)).to(device).squeeze(1)
         sample_classes = Variable(sample_classes.to(torch.int)).to(device)
+        z = Variable(torch.normal(mean=0, std=1, size=(32, LATENT_DIM))).to(device)
 
-        sample_smiles, _, _ = generator(sample_classes, sample_smiles)
+        sample_smiles, _, _ = generator(sample_classes, sample_smiles, z)
         # Translating smiles
 
         processed_molecules = translate_smiles(sample_smiles, dataset)
@@ -602,7 +606,6 @@ def train(generator, discriminator, criterion, batch_size=None, num_epochs = 100
                 print('Training model >> Epoch: [{}/{}] -- Batch: [{}]\nd_loss: {:.7f}  |  g_loss: {:.7f}\n\
                 |  g_disc_loss: {:.7f}, g_untranslatable_loss: {:.7f}, g_rep_loss: {:.7f}, g_vae_loss {:.7f}'.format(
                             epoch, num_epochs, i, d_loss, g_loss, g_disc_loss, g_untranslatable_loss, g_rep_loss, g_vae_loss))
-                
 
                 print('Best val:', best_validation_loss)
                 print('Current patience:', current_patience)
@@ -682,7 +685,7 @@ if __name__ == "__main__":
         GEN_OPT = selected_params["gen_opt"]
         GEN_OPT_STR = "ADAM" if GEN_OPT == torch.optim.Adam else ("SGD" if GEN_OPT == torch.optim.SGD else ("ADAMAX" if GEN_OPT == torch.optim.Adamax else "RMS"))
 
-        FOLDER_PATH = f"generated_files/{TOKENIZER}/{VOCAB_OPT}/{MIN_DIM}/{GEN_OPT_STR}/lr{LR}_gen{GLRM}_bs{BPE}"
+        FOLDER_PATH = f"n_generated_files/{TOKENIZER}/{VOCAB_OPT}/{MIN_DIM}/{GEN_OPT_STR}/lr{LR}_gen{GLRM}_bs{BPE}"
 
         os.makedirs(FOLDER_PATH, exist_ok=True)
 
@@ -695,4 +698,4 @@ if __name__ == "__main__":
         discriminator = Discriminator(dataset.smiles_nodes, dataset.smiles.shape, dataset.classes.shape, dataset.unique_classes, MIN_DIM).to(device)
 
         data_loader = torch.utils.data.DataLoader(dataset, BPE, shuffle=True)
-        train(generator, discriminator, criterion, batch_size=BPE, num_epochs=1000, num_classes=dataset.unique_classes)    
+        train(generator, discriminator, criterion, batch_size=BPE, num_epochs=300, num_classes=dataset.unique_classes)    

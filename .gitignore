@@ -4,4 +4,6 @@ data
 __pycache__
 guacamol
 generated_files
+unconditional_generated_files
+n_generated_files
 *.json

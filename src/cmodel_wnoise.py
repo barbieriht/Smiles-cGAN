@@ -458,9 +458,11 @@ def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, 
     return d_loss.data.item(), d_real_loss.data.item(), d_fake_loss.data.item()
 
 def save_state(generator, discriminator, g_optimizer, d_optimizer,
-               epoch, dataset, train_tracking, save_model_in, force_save = False):
+               epoch, dataset, train_tracking, save_model_in,
+               force_break = False, force_save = False):
 
-    if epoch % save_model_in == 0 or force_save == True:    
+    print('Saving state...')
+    if epoch % save_model_in == 0 and force_break == False or force_save == True:   
 
         for batch in generator_loader:
             sample_smiles, sample_classes = batch

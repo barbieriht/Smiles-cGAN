@@ -45,7 +45,7 @@ class smiles_coder:
             if TOKENIZER == "ATOM":
                 smiles_data[i] = smiles_data[i].ljust(max_length)
             else:
-                smiles_data[i] = smiles_data[i] + [" "] * max(0, self.max_length - len(smiles_data[i]))
+                smiles_data[i] = smiles_data[i] + [" "] * max(0, max_length - len(smiles_data[i]))
             self.char_set = self.char_set.union(set(smiles_data[i]))
         self.max_length = max_length
         self.n_class = len(self.char_set)
@@ -234,52 +234,62 @@ class DrugLikeMolecules(Dataset):
         return sml, labels
 
 class Generator(nn.Module):
-    def __init__(self, smiles_nodes, smiles_shape, classes_shape, unique_classes, noise_dim, MIN_DIM):
+    def __init__(self, smiles_nodes, smiles_shape, classes_shape, unique_classes, latent_dim, MIN_DIM):
         super().__init__()
         self.smiles_nodes = smiles_nodes
         self.smiles_shape = smiles_shape
 
         self.classes_shape = classes_shape
         self.unique_classes = unique_classes
-        self.noise_dim = noise_dim
+        self.latent_dim = latent_dim
 
-        self.label_emb = nn.Embedding(self.unique_classes, self.unique_classes)
+        self.label_emb = nn.Sequential(
+            nn.Embedding(self.unique_classes, MIN_DIM),
+            nn.Linear(MIN_DIM, self.smiles_nodes)
+        )
 
         self.encoder = nn.Sequential(
-            nn.Linear(self.smiles_nodes + self.unique_classes, MIN_DIM),
-            nn.BatchNorm1d(MIN_DIM),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(MIN_DIM, MIN_DIM//2),
-            nn.BatchNorm1d(MIN_DIM//2),
-            nn.LeakyReLU(0.2, inplace=True),
-        )
-
+            nn.Linear(2*self.smiles_nodes, MIN_DIM),
+            nn.LeakyReLU(0.2),
+            nn.Linear(MIN_DIM, self.latent_dim),
+            nn.LeakyReLU(0.2)
+            )
+        
+        self.mean_layer = nn.Linear(self.latent_dim, 2)
+        self.logvar_layer = nn.Linear(self.latent_dim, 2)
+        
         self.decoder = nn.Sequential(
-            nn.Conv1d(MIN_DIM//2 + self.unique_classes + self.noise_dim, MIN_DIM, kernel_size=1),
-            nn.BatchNorm1d(MIN_DIM),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Flatten(),
+            nn.Linear(2, self.latent_dim),
+            nn.LeakyReLU(0.2),
+            nn.Linear(self.latent_dim, MIN_DIM),
+            nn.LeakyReLU(0.2),
             nn.Linear(MIN_DIM, self.smiles_nodes),
-            nn.Tanh()
-        )
+            nn.Sigmoid()
+            )
+     
+    def encode(self, x):
+        x = self.encoder(x)
+        mean, logvar = self.mean_layer(x), self.logvar_layer(x)
+        return mean, logvar
 
-    def forward(self, z, c, rs):
-        z = z.view(z.size(0), self.noise_dim)
-        rs = rs.view(rs.size(0), self.smiles_nodes)
+    def reparameterization(self, mean, var):
+        epsilon = torch.randn_like(var).to(device)      
+        z = mean + var*epsilon
+        return z
 
-        assert torch.all(c >= 0)
-        assert torch.all(c < self.label_emb.num_embeddings)
+    def decode(self, x):
+        return self.decoder(x)
 
+    def forward(self, c, x):
+        x = x.view(x.size(0), self.smiles_nodes)
         c = self.label_emb(c)
 
-        x = torch.cat([rs.squeeze(1), c], 1)
+        x = torch.cat([x.squeeze(1), c], 1)
 
-        encoder_out = self.encoder(x)
-        y = torch.cat([encoder_out, c, z], 1)
-        
-        out = self.decoder(y.unsqueeze(-1))
-        
-        return out.squeeze()
+        mean, logvar = self.encode(x)
+        z = self.reparameterization(mean, logvar)
+        x_hat = self.decode(z)
+        return x_hat, mean, logvar
 
 class Discriminator(nn.Module):
     def __init__(self, smiles_nodes, smiles_shape, classes_shape, unique_classes, MIN_DIM):
@@ -359,25 +369,30 @@ class Discriminator(nn.Module):
 def check_repeated(data_list):
     unique_list = set(data_list)    
 
-    return 1-len(unique_list)/len(data_list)
+    return (1-len(unique_list)/len(data_list))*100
 
-# Generator Loss Function
 def generator_loss(validity, criterion):
     total_loss = 0.0
 
-    for k, guess in enumerate(validity):
+    for guess in validity:
         modulating_factor = (1 - guess)**2
         loss = modulating_factor * criterion(guess, torch.ones_like(guess).to(device))
         total_loss += loss
 
     return total_loss / len(validity)
 
+def vae_loss_function(x, x_hat, mean, log_var):
+    reproduction_loss = nn.functional.binary_cross_entropy(x_hat.reshape(x.shape), x, reduction='sum')
+    KLD = - 0.5 * torch.sum(1+ log_var - mean.pow(2) - log_var.exp())
+
+    return (reproduction_loss + KLD) / len(x)
+
 # Discriminator Loss Function
 def discriminator_loss(real_validity, fake_validity, criterion):
     total_real_loss = 0.0
     total_fake_loss = 0.0
 
-    for k, (r_guess, f_guess) in enumerate(zip(real_validity, fake_validity)):
+    for (r_guess, f_guess) in zip(real_validity, fake_validity):
         modulating_factor_real = (1 - r_guess)**2
         modulating_factor_fake = (1 - f_guess)**2
 
@@ -392,32 +407,31 @@ def discriminator_loss(real_validity, fake_validity, criterion):
 def generator_train_step(batch_size, discriminator, generator, g_optimizer, criterion, labels, num_classes, real_smiles):
     g_optimizer.zero_grad()
     
-    z = Variable(torch.normal(mean=0, std=1, size=(batch_size, NOISE_DIM))).to(device)
-
     fake_labels = Variable(torch.randint(0, num_classes, size=labels.shape).to(torch.int)).to(device)
 
-    fake_smiles = generator(z, fake_labels, real_smiles)
+    fake_smiles, mean, logvar = generator(fake_labels, real_smiles)
+
+    vae_loss = vae_loss_function(real_smiles, fake_smiles, mean, logvar)
+
     validity = discriminator(fake_smiles, fake_labels)
 
     translated_smiles = translate_smiles(fake_smiles, dataset)
 
     block = BlockLogs()
 
-    g_smiles_validity_loss = np.mean([float(1) if Chem.MolFromSmiles(this) == None else float(0) for this in translated_smiles])
+    untranslatable_loss = torch.nn.functional.binary_cross_entropy(torch.tensor([float(1) if Chem.MolFromSmiles(this) == None else float(0) for this in translated_smiles], dtype=torch.float32), torch.zeros(batch_size))
 
     del block
         
-    untranslatable_loss = torch.tensor(math.log(1 + g_smiles_validity_loss) / math.log(2), requires_grad=True)
-
-    g_repeated_loss = torch.tensor(math.log(1 + check_repeated(translated_smiles)) / math.log(2), requires_grad=True)
+    g_repeated_loss = torch.tensor(check_repeated(translated_smiles))
     
     g_discriminator_loss = torch.sum(generator_loss(validity, criterion))
     
-    g_loss =  (g_discriminator_loss + untranslatable_loss + g_repeated_loss)**2
+    g_loss =  (1 + g_discriminator_loss)*(untranslatable_loss + g_repeated_loss + vae_loss)
     
     g_loss.backward()
     g_optimizer.step()
-    return g_loss.data.item(), g_repeated_loss.data.item(), g_discriminator_loss.data.item(), untranslatable_loss.data.item()
+    return g_loss.data.item(), g_repeated_loss.data.item(), g_discriminator_loss.data.item(), untranslatable_loss.data.item(), vae_loss.item()
 
 def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, criterion, real_smiles, labels, num_classes):
     d_optimizer.zero_grad()
@@ -426,9 +440,8 @@ def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, 
     real_validity = discriminator(real_smiles, labels)
 
     # train with fake smiles
-    z = Variable(torch.normal(mean=0, std=1, size=(batch_size, NOISE_DIM))).to(device)
     fake_labels = Variable(torch.randint(0, num_classes, size=labels.shape).to(torch.int)).to(device)
-    fake_smiles = generator(z, fake_labels, real_smiles)
+    fake_smiles, _, _ = generator(fake_labels, real_smiles)
     fake_validity = discriminator(fake_smiles, fake_labels)
 
     d_real_loss, d_fake_loss = discriminator_loss(real_validity, fake_validity, criterion)
@@ -442,7 +455,7 @@ def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, 
     return d_loss.data.item(), d_real_loss.data.item(), d_fake_loss.data.item()
 
 def save_state(generator, discriminator, g_optimizer, d_optimizer,
-               epoch, dataset, train_tracking, save_model_in, force_save):
+               epoch, dataset, train_tracking, save_model_in, force_save = False):
 
     if epoch % save_model_in == 0 or force_save == True:    
 
@@ -453,8 +466,7 @@ def save_state(generator, discriminator, g_optimizer, d_optimizer,
         sample_smiles = Variable(sample_smiles.to(torch.float)).to(device).squeeze(1)
         sample_classes = Variable(sample_classes.to(torch.int)).to(device)
 
-        z = Variable(torch.normal(mean=0, std=1, size=(32, NOISE_DIM))).to(device)
-        sample_smiles = generator(z, sample_classes, sample_smiles)
+        sample_smiles, _, _ = generator(sample_classes, sample_smiles)
         # Translating smiles
 
         processed_molecules = translate_smiles(sample_smiles, dataset)
@@ -483,15 +495,14 @@ def save_state(generator, discriminator, g_optimizer, d_optimizer,
 
         with open(f"{FOLDER_PATH}/classes/cgan_{epoch}.txt", 'w') as f:
             for classes in all_gen_classes:
-                f.write('@'.join(classes))
-                f.write('\n')
+                f.write('@' + classes + '\n')
             f.close()
 
     with open(f"{FOLDER_PATH}/statistics.json", 'w') as f:
         json.dump(train_tracking, f)
         f.close()
 
-    plot(f"{FOLDER_PATH}/statistics.json", path_to_save=FOLDER_PATH, file_name=f"{TOKENIZER}_{VOCAB_OPT}_{MIN_DIM}_{GEN_OPT_STR}_lr{LR}_gen{GLRM}_bs{BPE}")
+    plot(f"{FOLDER_PATH}/statistics.json", path_to_save=FOLDER_PATH, file_name=f"{TOKENIZER}_{VOCAB_OPT}_{MIN_DIM}_lr{LR}_gen{GLRM}_bs{BPE}")
 
 def load_states(generator, g_optimizer, discriminator, d_optimizer):
     def extract_single_integer_from_string(input_string):
@@ -539,14 +550,15 @@ def train(generator, discriminator, criterion, batch_size=None, num_epochs = 100
     else:
         train_tracking = {}
 
-    d_optimizer = GEN_OPT(discriminator.parameters(), lr=LR, weight_decay=0.001)
-    g_optimizer = GEN_OPT(generator.parameters(), lr=GLRM*LR, weight_decay=0.001)
+    d_optimizer = torch.optim.Adam(discriminator.parameters(), lr=LR, weight_decay=0.001)
+    g_optimizer = torch.optim.Adam(generator.parameters(), lr=GLRM*LR, weight_decay=0.001)
     
     generator, g_optimizer, discriminator, d_optimizer, start_epoch = load_states(generator, g_optimizer, discriminator, d_optimizer)        
 
     for epoch in range(start_epoch, num_epochs+1):
         this_epock_tracking = {"D Loss":[], "D Real Loss":[], "D Fake Loss":[], "G Loss":[],
-                                 "G Untranslatable Loss":[], "G Disc Loss":[], "G Repetition Loss":[]}
+                                 "G Untranslatable Loss":[], "G Disc Loss":[], "G Repetition Loss":[],
+                                 "G VAE Loss":[]}
         
         for i, (smiles, labels) in enumerate(data_loader):
 
@@ -568,10 +580,9 @@ def train(generator, discriminator, criterion, batch_size=None, num_epochs = 100
                                                 generator, d_optimizer, criterion, real_smiles,
                                                 labels, num_classes)
 
-            g_loss, g_rep_loss, g_disc_loss, g_untranslatable_loss  = generator_train_step(batch_size, discriminator, generator, g_optimizer,
+            g_loss, g_rep_loss, g_disc_loss, g_untranslatable_loss, g_vae_loss  = generator_train_step(batch_size, discriminator, generator, g_optimizer,
                                            criterion, labels, num_classes, real_smiles)
             
-
             this_epock_tracking["D Loss"].append(d_loss)
             this_epock_tracking["D Real Loss"].append(d_real)
             this_epock_tracking["D Fake Loss"].append(d_fake)
@@ -579,15 +590,16 @@ def train(generator, discriminator, criterion, batch_size=None, num_epochs = 100
             this_epock_tracking["G Repetition Loss"].append(g_rep_loss)
             this_epock_tracking["G Disc Loss"].append(g_disc_loss)
             this_epock_tracking["G Untranslatable Loss"].append(g_untranslatable_loss)
+            this_epock_tracking["G VAE Loss"].append(g_vae_loss)
 
             
             if i%5==0:
                 os.system('clear')
 
-                print(selected_params)
-                print('Training model >> Epoch: [{}/{}] -- Batch: [{}]\nd_loss: {:.2f}  |  g_loss: {:.2f}\n\
-                |  g_disc_loss: {:.2f}, g_untranslatable_loss: {:.2f}, g_rep_loss: {:.2f}'.format(
-                            epoch, num_epochs, i, d_loss, g_loss, g_disc_loss, g_untranslatable_loss, g_rep_loss))
+                print('Path:', FOLDER_PATH)
+                print('Training model >> Epoch: [{}/{}] -- Batch: [{}]\nd_loss: {:.7f}  |  g_loss: {:.7f}\n\
+                |  g_disc_loss: {:.7f}, g_untranslatable_loss: {:.7f}, g_rep_loss: {:.7f}, g_vae_loss {:.7f}'.format(
+                            epoch, num_epochs, i, d_loss, g_loss, g_disc_loss, g_untranslatable_loss, g_rep_loss, g_vae_loss))
 
         generator.eval()
 
@@ -597,7 +609,8 @@ def train(generator, discriminator, criterion, batch_size=None, num_epochs = 100
                                 "G Loss":np.mean(this_epock_tracking["G Loss"]),
                                 "G Untranslatable Loss":np.mean(this_epock_tracking["G Untranslatable Loss"]),
                                 "G Disc Loss":np.mean(this_epock_tracking["G Disc Loss"]),
-                                "G Repetition Loss":np.mean(this_epock_tracking["G Repetition Loss"])
+                                "G Repetition Loss":np.mean(this_epock_tracking["G Repetition Loss"]),
+                                "G VAE Loss":np.mean(this_epock_tracking["G VAE Loss"])
                                 }
         
         if g_loss < best_validation_loss and g_loss < 1:
@@ -610,7 +623,9 @@ def train(generator, discriminator, criterion, batch_size=None, num_epochs = 100
             force_break = True
 
         save_state(generator, discriminator, g_optimizer, d_optimizer,
-                    epoch, dataset, train_tracking, display_step, force_break)
+                    epoch, dataset, train_tracking, display_step,
+                    force_break
+                    )
 
 
         if force_break:
@@ -623,17 +638,11 @@ if __name__ == "__main__":
 
     params = {
               "tokenizer":["ATOM", "FRAGMENT"],
-              "noise_dim":[50],
-              "batch_per_epoca": [128, 64],
-              "generator_lr_multiplier": [1, 5],
-              "min_dim":[64, 128],
-              "learning_rate": [0.00001, 0.001],
-              "gen_opt":[
-                            torch.optim.RMSprop,
-                            torch.optim.Adamax,
-                            torch.optim.SGD,
-                            torch.optim.Adam,
-                         ],
+              "latent_dim":[50],
+              "batch_per_epoca": [64],
+              "generator_lr_multiplier": [5],
+              "min_dim":[128],
+              "learning_rate": [0.00001],
               "dataset":['chebi_selected_smiles.txt', 'dense_chebi_selected_smiles.txt']
             }
     
@@ -644,16 +653,14 @@ if __name__ == "__main__":
         print(selected_params)
 
         TOKENIZER = selected_params["tokenizer"]
-        NOISE_DIM = selected_params["noise_dim"]
+        LATENT_DIM = selected_params["latent_dim"]
         MIN_DIM = selected_params["min_dim"]
         BPE = selected_params["batch_per_epoca"]
         LR = selected_params["learning_rate"]
         GLRM = selected_params["generator_lr_multiplier"]
-        GEN_OPT = selected_params["gen_opt"]
         DATASET = selected_params["dataset"]
-        GEN_OPT_STR = "ADAM" if GEN_OPT == torch.optim.Adam else ("SGD" if GEN_OPT == torch.optim.SGD else ("ADAMAX" if GEN_OPT == torch.optim.Adamax else "RMS"))
         VOCAB_OPT = "DENSE" if "dense_" in DATASET else "SPARSE"
-        FOLDER_PATH = f"generated_files/{TOKENIZER}/{VOCAB_OPT}/{MIN_DIM}/{GEN_OPT_STR}/lr{LR}_gen{GLRM}_bs{BPE}"
+        FOLDER_PATH = f"generated_files/{TOKENIZER}/{VOCAB_OPT}/{MIN_DIM}/lr{LR}_gen{GLRM}_bs{BPE}"
 
         os.makedirs(FOLDER_PATH, exist_ok=True)
 
@@ -662,8 +669,8 @@ if __name__ == "__main__":
         generator_loader = torch.utils.data.DataLoader(dataset, batch_size=32, shuffle=True)
 
         criterion = nn.BCELoss()
-        generator = Generator(dataset.smiles_nodes, dataset.smiles.shape, dataset.classes.shape, dataset.unique_classes, NOISE_DIM, MIN_DIM).to(device)
+        generator = Generator(dataset.smiles_nodes, dataset.smiles.shape, dataset.classes.shape, dataset.unique_classes, LATENT_DIM, MIN_DIM).to(device)
         discriminator = Discriminator(dataset.smiles_nodes, dataset.smiles.shape, dataset.classes.shape, dataset.unique_classes, MIN_DIM).to(device)
 
         data_loader = torch.utils.data.DataLoader(dataset, BPE, shuffle=True)
-        train(generator, discriminator, criterion, batch_size=BPE, num_epochs=300, num_classes=dataset.unique_classes)    
+        train(generator, discriminator, criterion, batch_size=BPE, num_epochs=1000, num_classes=dataset.unique_classes)    

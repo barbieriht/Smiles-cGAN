@@ -456,10 +456,10 @@ def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, 
 
 def save_state(generator, discriminator, g_optimizer, d_optimizer,
                epoch, dataset, train_tracking, save_model_in,
-               force_break = False, force_save = False):
+               force_break = False):
 
-    print('Saving state...')
-    if epoch % save_model_in == 0 and force_break == False or force_save == True:    
+    if epoch % save_model_in == 0 and force_break == False:    
+        print('Saving state...')
 
         for batch in generator_loader:
             sample_smiles, sample_classes = batch
@@ -623,11 +623,6 @@ def train(generator, discriminator, criterion, batch_size=None, num_epochs = 100
         if np.mean(this_epock_tracking["G Loss"]) < best_validation_loss:
             best_validation_loss = np.mean(this_epock_tracking["G Loss"])
             current_patience = 0
-
-            if epoch >= 50:
-                save_state(generator, discriminator, g_optimizer, d_optimizer,
-                        epoch, dataset, train_tracking, display_step,
-                        force_break, True)
         else:
             current_patience += 1
 

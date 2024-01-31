@@ -369,7 +369,7 @@ class Discriminator(nn.Module):
 def check_repeated(data_list):
     unique_list = set(data_list)    
 
-    return (1-len(unique_list)/len(data_list))*100
+    return 1-len(unique_list)/len(data_list)
 
 def generator_loss(validity, criterion):
     total_loss = 0.0
@@ -428,7 +428,7 @@ def generator_train_step(batch_size, discriminator, generator, g_optimizer, crit
     
     g_discriminator_loss = torch.sum(generator_loss(validity, criterion))
     
-    g_loss =  (1 + g_discriminator_loss)*(untranslatable_loss + g_repeated_loss + vae_loss)
+    g_loss = (1 + g_discriminator_loss + (untranslatable_loss/100 + g_repeated_loss)/2)*vae_loss
     
     g_loss.backward()
     g_optimizer.step()
@@ -459,10 +459,10 @@ def discriminator_train_step(batch_size, discriminator, generator, d_optimizer, 
 
 def save_state(generator, discriminator, g_optimizer, d_optimizer,
                epoch, dataset, train_tracking, save_model_in,
-               force_break = False, force_save = False):
+               force_break = False):
 
-    print('Saving state...')
-    if epoch % save_model_in == 0 and force_break == False or force_save == True:   
+    if epoch % save_model_in == 0 and force_break == False:   
+        print('Saving state...')
 
         for batch in generator_loader:
             sample_smiles, sample_classes = batch
@@ -626,11 +626,6 @@ def train(generator, discriminator, criterion, batch_size=None, num_epochs = 100
         if np.mean(this_epock_tracking["G Loss"]) < best_validation_loss:
             best_validation_loss = np.mean(this_epock_tracking["G Loss"])
             current_patience = 0
-
-            if epoch >= 50:
-                save_state(generator, discriminator, g_optimizer, d_optimizer,
-                        epoch, dataset, train_tracking, display_step,
-                        force_break, True)
         else:
             current_patience += 1
 
@@ -643,7 +638,6 @@ def train(generator, discriminator, criterion, batch_size=None, num_epochs = 100
                     force_break
                     )
 
-
         if force_break:
             return train_tracking
         
@@ -653,7 +647,10 @@ if __name__ == "__main__":
     patience = 5
 
     params = {
-              "tokenizer":["ATOM", "FRAGMENT"],
+              "tokenizer":[
+                  "ATOM", 
+                #   "FRAGMENT"
+                  ],
               "latent_dim":[64],
               "batch_per_epoca": [64],
               "generator_lr_multiplier": [5],
@@ -665,7 +662,10 @@ if __name__ == "__main__":
                             torch.optim.SGD,
                             torch.optim.Adam,
                          ],
-              "dataset":['chebi_selected_smiles.txt', 'dense_chebi_selected_smiles.txt']
+              "dataset":[
+                        'chebi_selected_smiles.txt',
+                        'dense_chebi_selected_smiles.txt'
+                        ]
             }
     
     params_combinations = list(product(*params.values()))
@@ -685,7 +685,7 @@ if __name__ == "__main__":
         GEN_OPT = selected_params["gen_opt"]
         GEN_OPT_STR = "ADAM" if GEN_OPT == torch.optim.Adam else ("SGD" if GEN_OPT == torch.optim.SGD else ("ADAMAX" if GEN_OPT == torch.optim.Adamax else "RMS"))
 
-        FOLDER_PATH = f"n_generated_files/{TOKENIZER}/{VOCAB_OPT}/{MIN_DIM}/{GEN_OPT_STR}/lr{LR}_gen{GLRM}_bs{BPE}"
+        FOLDER_PATH = f"n2_generated_files/{TOKENIZER}/{VOCAB_OPT}/{MIN_DIM}/{GEN_OPT_STR}/lr{LR}_gen{GLRM}_bs{BPE}"
 
         os.makedirs(FOLDER_PATH, exist_ok=True)
 
